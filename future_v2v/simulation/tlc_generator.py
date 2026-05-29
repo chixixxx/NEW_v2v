@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from future_v2v.config import EnvironmentConfig, ScaleConfig
+from future_v2v.data.tlc_manhattan import TLCManhattanData, TICKS_PER_DAY
+from future_v2v.simulation.entities import Order, Vehicle
+from future_v2v.simulation.generator import Scenario
+
+
+class TLCManhattanScenarioGenerator:
+    def __init__(self, env_config: EnvironmentConfig, scale_config: ScaleConfig, data: TLCManhattanData) -> None:
+        self.env_config = env_config
+        self.scale_config = scale_config
+        self.data = data
+
+    def generate(self, seed: int) -> Scenario:
+        rng = np.random.default_rng(seed)
+        day, start_tick_day, rows = self._select_window(rng)
+        sampled_orders = self._sample_order_rows(rows, rng)
+        orders = self._generate_orders(sampled_orders, start_tick_day, rng)
+        vehicles = self._generate_vehicles(start_tick_day, rng)
+        return Scenario(
+            orders=orders,
+            vehicles=vehicles,
+            source="tlc_manhattan",
+            day=day,
+            start_tick_day=start_tick_day,
+        )
+
+    def _select_window(self, rng: np.random.Generator) -> tuple[str, int, pd.DataFrame]:
+        available_days = self._eligible_days()
+        horizon = self.scale_config.horizon_ticks
+        latest_start = max(0, TICKS_PER_DAY - horizon)
+        best: tuple[str, int, pd.DataFrame] | None = None
+        for _ in range(16):
+            day = str(rng.choice(available_days))
+            start_tick_day = int(rng.integers(0, latest_start + 1))
+            rows = self.data.rows_for_window(day, start_tick_day, horizon)
+            if best is None or len(rows) > len(best[2]):
+                best = (day, start_tick_day, rows)
+            if len(rows) >= max(20, int(self.scale_config.total_orders * 0.65)):
+                return day, start_tick_day, rows
+        if best is None or best[2].empty:
+            fallback_pool = self.data.trip_rows[self.data.trip_rows["pickup_date"].isin(available_days)]
+            if fallback_pool.empty:
+                raise RuntimeError("No TLC Manhattan trip rows found for any sampled episode window.")
+            anchor = fallback_pool.iloc[int(rng.integers(0, len(fallback_pool)))]
+            day = str(anchor.pickup_date)
+            start_tick_day = int(np.clip(int(anchor.pickup_tick_day) - horizon // 2, 0, latest_start))
+            rows = self.data.rows_for_window(day, start_tick_day, horizon)
+            if rows.empty:
+                raise RuntimeError("No TLC Manhattan trip rows found around fallback anchor row.")
+            return day, start_tick_day, rows
+        return best
+
+    def _eligible_days(self) -> list[str]:
+        configured = self.env_config.train_days or self.env_config.eval_days or []
+        configured = [str(day) for day in configured]
+        if configured:
+            available = set(self.data.days)
+            matched = [day for day in configured if day in available]
+            if matched:
+                return matched
+        return self.data.days
+
+    def _sample_order_rows(self, rows: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+        if rows.empty:
+            return rows
+        raw_target = int(len(rows) * max(0.01, self.env_config.demand_sample_rate))
+        target = max(1, min(self.scale_config.total_orders, raw_target))
+        if len(rows) <= target:
+            sampled = rows.copy()
+        else:
+            weights = np.clip(rows["zone_pressure"].to_numpy(dtype=float), 0.4, 2.5)
+            weights = weights / weights.sum()
+            indices = rng.choice(rows.index.to_numpy(), size=target, replace=False, p=weights)
+            sampled = rows.loc[indices].copy()
+        return sampled.sort_values(["pickup_tick_day", "pu_zone"]).reset_index(drop=True)
+
+    def _generate_orders(self, rows: pd.DataFrame, start_tick_day: int, rng: np.random.Generator) -> list[Order]:
+        orders: list[Order] = []
+        for order_id, row in enumerate(rows.itertuples(index=False)):
+            pressure = float(getattr(row, "zone_pressure"))
+            arrival_tick = int(getattr(row, "pickup_tick_day") - start_tick_day)
+            demand = float(np.clip(getattr(row, "demand_kwh_base") * rng.lognormal(0.0, 0.08), 3.0, 22.0))
+            max_wait = self._sample_wait_ticks(pressure, rng)
+            urgency_markup = 1.0 + max(0.0, 6 - max_wait) * 0.08 + 0.08 * max(0.0, pressure - 1.0)
+            wtp = float(np.clip(getattr(row, "willingness_to_pay_proxy") * urgency_markup, 3.2, 12.0))
+            cancel_sensitivity = float(np.clip(rng.normal(0.15 + 0.035 * pressure + 0.02 * (max_wait <= 4), 0.025), 0.08, 0.32))
+            orders.append(
+                Order(
+                    order_id=order_id,
+                    arrival_tick=arrival_tick,
+                    origin_zone=int(getattr(row, "pu_zone")),
+                    destination_zone=int(getattr(row, "do_zone")),
+                    demand_kwh=demand,
+                    max_wait_ticks=max_wait,
+                    willingness_to_pay_per_kwh=wtp,
+                    cancel_sensitivity=cancel_sensitivity,
+                )
+            )
+        orders.sort(key=lambda order: (order.arrival_tick, order.order_id))
+        return orders
+
+    def _generate_vehicles(self, start_tick_day: int, rng: np.random.Generator) -> list[Vehicle]:
+        horizon = self.scale_config.horizon_ticks + self.scale_config.terminal_buffer_ticks
+        candidate_count = max(1, int(self.scale_config.candidate_vehicles * max(0.05, self.env_config.supply_scale)))
+        supply_rows = self.data.supply_rows_for_window(start_tick_day, self.scale_config.horizon_ticks)
+        vehicles: list[Vehicle] = []
+        for candidate_id in range(candidate_count):
+            if rng.random() > self.scale_config.vehicle_join_probability:
+                continue
+            source_row = self._sample_supply_row(supply_rows, rng)
+            fleet = bool(rng.random() < self.scale_config.fleet_probability)
+            if source_row is None:
+                join_tick = int(rng.integers(0, max(1, self.scale_config.horizon_ticks)))
+                current_zone = int(rng.integers(0, self.data.zone_count))
+                destination_zone = int(rng.integers(0, self.data.zone_count))
+            else:
+                join_tick = int(np.clip(int(source_row.dropoff_tick_day) - start_tick_day, 0, self.scale_config.horizon_ticks - 1))
+                current_zone = int(source_row.do_zone)
+                destination_zone = int(source_row.pu_zone)
+            online_duration = int(rng.integers(16, 38) if not fleet else rng.integers(30, 58))
+            leave_tick = min(horizon, join_tick + online_duration)
+            if leave_tick <= join_tick:
+                leave_tick = min(horizon, join_tick + 1)
+            capacity = float(rng.choice([55.0, 65.0, 75.0, 90.0, 105.0]))
+            soc_ratio = float(rng.uniform(0.48, 0.88 if fleet else 0.80))
+            reserve = float(rng.uniform(10.0, 22.0))
+            reservation_price = float(np.clip(rng.normal(2.35 if fleet else 3.05, 0.38), 1.5, 4.5))
+            time_cost = float(np.clip(rng.normal(0.055 if fleet else 0.075, 0.018), 0.02, 0.13))
+            accept_sensitivity = float(np.clip(rng.normal(0.72 if fleet else 0.95, 0.12), 0.45, 1.35))
+            vehicles.append(
+                Vehicle(
+                    vehicle_id=len(vehicles),
+                    join_tick=join_tick,
+                    leave_tick=leave_tick,
+                    current_zone=current_zone,
+                    destination_zone=destination_zone,
+                    battery_capacity_kwh=capacity,
+                    current_soc_kwh=capacity * soc_ratio,
+                    reserve_kwh=reserve,
+                    reservation_price_per_kwh=reservation_price,
+                    time_cost_per_min=time_cost,
+                    owner_accept_sensitivity=accept_sensitivity,
+                    fleet_flag=fleet,
+                )
+            )
+            _ = candidate_id
+        vehicles.sort(key=lambda vehicle: (vehicle.join_tick, vehicle.vehicle_id))
+        return vehicles
+
+    @staticmethod
+    def _sample_wait_ticks(pressure: float, rng: np.random.Generator) -> int:
+        if pressure >= 1.45:
+            choices = np.array([2, 3, 4, 5, 6, 8])
+            probs = np.array([0.12, 0.18, 0.24, 0.20, 0.16, 0.10])
+        else:
+            choices = np.array([4, 5, 6, 8, 10, 12])
+            probs = np.array([0.10, 0.14, 0.20, 0.24, 0.20, 0.12])
+        return int(rng.choice(choices, p=probs / probs.sum()))
+
+    @staticmethod
+    def _sample_supply_row(rows: pd.DataFrame, rng: np.random.Generator):
+        if rows.empty:
+            return None
+        idx = int(rng.integers(0, len(rows)))
+        return rows.iloc[idx]

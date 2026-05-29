@@ -12,6 +12,9 @@ from future_v2v.simulation.entities import Order, Vehicle
 class Scenario:
     orders: list[Order]
     vehicles: list[Vehicle]
+    source: str = "synthetic"
+    day: str = ""
+    start_tick_day: int = 0
 
 
 class ScenarioGenerator:
@@ -109,4 +112,3 @@ class ScenarioGenerator:
             _ = candidate_id
         vehicles.sort(key=lambda vehicle: (vehicle.join_tick, vehicle.vehicle_id))
         return vehicles
-

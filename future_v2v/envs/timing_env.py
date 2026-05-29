@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from future_v2v.config import EnvironmentConfig, ScaleConfig
+from future_v2v.data.tlc_manhattan import load_tlc_manhattan_data
 from future_v2v.metrics import EpisodeMetrics, constrained_profit_score
 from future_v2v.simulation.entities import (
     ORDER_CANCELLED,
@@ -18,7 +19,8 @@ from future_v2v.simulation.entities import (
 )
 from future_v2v.simulation.generator import ScenarioGenerator
 from future_v2v.simulation.matcher import ConstrainedMatcher
-from future_v2v.simulation.network import ZoneNetwork
+from future_v2v.simulation.network import TLCManhattanZoneNetwork, ZoneNetwork
+from future_v2v.simulation.tlc_generator import TLCManhattanScenarioGenerator
 
 WAIT = 0
 MATCH = 1
@@ -61,9 +63,8 @@ class FutureV2VTimingEnv:
     def __init__(self, env_config: EnvironmentConfig, scale_config: ScaleConfig, seed: int = 0) -> None:
         self.env_config = env_config
         self.scale_config = scale_config
-        self.network = ZoneNetwork(env_config.zone_count)
+        self.network, self.generator = self._build_network_and_generator()
         self.matcher = ConstrainedMatcher(env_config, self.network)
-        self.generator = ScenarioGenerator(env_config, scale_config)
         self.seed = seed
         self.rng = np.random.default_rng(seed)
         self.current_tick = 0
@@ -85,6 +86,8 @@ class FutureV2VTimingEnv:
             self.seed = seed
         self.rng = np.random.default_rng(self.seed)
         scenario = self.generator.generate(self.seed)
+        if hasattr(self.network, "set_episode_context"):
+            self.network.set_episode_context(start_tick_day=scenario.start_tick_day)
         self.orders = scenario.orders
         self.vehicles = scenario.vehicles
         self.orders_by_id = {order.order_id: order for order in self.orders}
@@ -332,3 +335,16 @@ class FutureV2VTimingEnv:
             return float(self.scale_config.horizon_ticks)
         return float(np.mean(np.diff(self.dispatch_ticks)))
 
+    def _build_network_and_generator(self):
+        if self.env_config.scenario_source == "tlc_manhattan":
+            try:
+                data = load_tlc_manhattan_data(self.env_config)
+                network = TLCManhattanZoneNetwork(data=data)
+                generator = TLCManhattanScenarioGenerator(self.env_config, self.scale_config, data)
+                return network, generator
+            except FileNotFoundError:
+                if not (self.env_config.allow_synthetic_smoke_fallback and self.scale_config.name == "smoke"):
+                    raise
+        network = ZoneNetwork(self.env_config.zone_count)
+        generator = ScenarioGenerator(self.env_config, self.scale_config)
+        return network, generator

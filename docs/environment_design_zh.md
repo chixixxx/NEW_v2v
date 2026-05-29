@@ -1,5 +1,17 @@
 # Future V2V Benchmark Environment 说明
 
+## 路网与数据源
+
+当前默认主环境为 `tlc_manhattan`：
+
+- 订单到达、OD 热点、行程时长和价格强度来自 NYC TLC 黄出租车月度数据。
+- 路网层级使用 Manhattan taxi zone，不使用 16 区合成网格作为主环境。
+- travel time 优先使用同月黄出租 OD 在对应时段的中位行程时间。
+- 缺失 OD 会回退到同 OD 全时段中位数、同 origin 中位数或全局中位数。
+- 黄出租数据不被直接解释为 V2V 交易，只作为未来 V2V 需求与城市移动模式的真实校准源。
+
+合成 16 区网格仍保留为 smoke/test fallback：当 `scale=smoke` 且 TLC 缓存不存在时，可以继续运行最小工程验证。
+
 ## 实体属性
 
 订单只保留必要属性：
@@ -22,6 +34,16 @@
 - `owner_accept_sensitivity`：接受概率敏感度。
 - `fleet_flag`：是否为平台或半平台车辆。
 
+## TLC 到 V2V 的改造口径
+
+- `arrival_tick` 来自出租车 pickup 时间在 episode 窗口内的位置。
+- `origin_zone` 来自 `PULocationID`，表示需求发生区域。
+- `destination_zone` 来自 `DOLocationID`，在 V2V 中解释为服务完成后车辆可能靠近的活动区域。
+- `demand_kwh` 由 trip distance、duration 和业务扰动生成，控制在 V2V 合理电量区间。
+- `willingness_to_pay_per_kwh` 由 total amount 与电量需求校准，并加上下限约束。
+- `max_wait_ticks` 不直接使用出租车等待语义，而是按时段压力生成。
+- 车辆供给不直接使用同 tick 出租车作为供电车辆，而是用历史 dropoff/idle 空间分布校准入池区域，再按 V2V 业务生成电量、报价、在线时间和保留电量。
+
 ## 动态机制
 
 - 订单按双峰需求到达，热点区域随时间旋转。
@@ -42,6 +64,8 @@
 
 匹配目标为最大化候选边期望利润。第一版使用 Hungarian assignment，并允许订单不匹配。
 
+为保证 Manhattan main 规模可训练，候选图默认按订单侧保留最近的若干可供电车辆，参数为 `environment.max_candidate_vehicles_per_order`。所有 baseline 和 RL 策略共享同一个候选图，因此比较口径一致。
+
 ## 主指标
 
 主指标为 `future_v2v_score`，以平台利润为核心，同时惩罚：
@@ -54,4 +78,3 @@
 - 平均承诺时间过长。
 
 这个指标用于表达未来 V2V 平台更真实的多目标经营约束，而不是只追求单边利润或单纯服务数量。
-

@@ -24,12 +24,14 @@ class ConstrainedMatcher:
 
     def build_edges(self, orders: list[Order], vehicles: list[Vehicle], tick: int) -> list[CandidateEdge]:
         edges: list[CandidateEdge] = []
+        active_vehicles = [vehicle for vehicle in vehicles if vehicle.is_active(tick)]
+        vehicles_by_zone: dict[int, list[Vehicle]] = {}
+        for vehicle in active_vehicles:
+            vehicles_by_zone.setdefault(vehicle.current_zone, []).append(vehicle)
         for order in orders:
             if not order.is_active(tick):
                 continue
-            for vehicle in vehicles:
-                if not vehicle.is_active(tick):
-                    continue
+            for vehicle in self._candidate_vehicles_for_order(order, active_vehicles, vehicles_by_zone, tick):
                 edges.append(self.score_edge(order, vehicle, tick))
         return [edge for edge in edges if edge.feasible]
 
@@ -162,3 +164,24 @@ class ConstrainedMatcher:
         raw = (margin_per_kwh - pickup_disutility) / max(0.1, vehicle.owner_accept_sensitivity)
         return float(1.0 / (1.0 + math.exp(-raw)))
 
+    def _candidate_vehicles_for_order(
+        self,
+        order: Order,
+        active_vehicles: list[Vehicle],
+        vehicles_by_zone: dict[int, list[Vehicle]],
+        tick: int,
+    ) -> list[Vehicle]:
+        limit = int(getattr(self.env_config, "max_candidate_vehicles_per_order", 0) or 0)
+        if limit <= 0 or len(active_vehicles) <= limit:
+            return active_vehicles
+        candidates: list[tuple[float, float, int, Vehicle]] = []
+        for zone, zone_vehicles in vehicles_by_zone.items():
+            pickup_minutes = self.network.travel_minutes(zone, order.origin_zone, tick)
+            if pickup_minutes > self.env_config.pickup_cap_minutes:
+                continue
+            for vehicle in zone_vehicles:
+                if vehicle.available_energy_kwh() < order.demand_kwh:
+                    continue
+                candidates.append((pickup_minutes, -vehicle.available_energy_kwh(), vehicle.vehicle_id, vehicle))
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [item[3] for item in candidates[:limit]]

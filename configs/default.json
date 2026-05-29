@@ -6,6 +6,19 @@
   },
   "environment": {
     "zone_count": 16,
+    "scenario_source": "tlc_manhattan",
+    "allow_synthetic_smoke_fallback": true,
+    "tlc_trip_path": "yellow_tripdata_2025-10.parquet",
+    "taxi_zone_lookup_path": "taxi_zone_lookup.csv",
+    "taxi_zone_geo_path": "",
+    "processed_dir": "data/processed",
+    "manhattan_only": true,
+    "travel_time_source": "empirical_median",
+    "demand_sample_rate": 0.35,
+    "supply_scale": 1.0,
+    "max_candidate_vehicles_per_order": 64,
+    "train_days": [],
+    "eval_days": [],
     "service_kwh_per_tick": 4.5,
     "pickup_cap_minutes": 18.0,
     "platform_pickup_cost_per_min": 0.06,
@@ -60,4 +73,3 @@
     "prioritized_replay": true
   }
 }
-

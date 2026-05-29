@@ -5,7 +5,11 @@ __pycache__/
 .mypy_cache/
 .venv/
 outputs/
+data/processed/
+data/raw/
+*.parquet
+taxi_zone_lookup.csv
+taxi_zones.*
 *.pt
 *.pth
 *.log
-

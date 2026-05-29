@@ -14,8 +14,37 @@ cd C:\Sioux\future_v2v_adaptive_timing
 - numpy
 - scipy
 - torch
+- pandas
+- pyarrow
 - pytest
 - ruff
+
+## TLC Manhattan 数据准备
+
+将 NYC TLC 黄出租月度 parquet 和 taxi zone lookup 放到项目目录，默认文件名为：
+
+```text
+yellow_tripdata_2025-10.parquet
+taxi_zone_lookup.csv
+```
+
+然后运行：
+
+```bash
+python scripts/prepare_tlc_manhattan.py --month 2025-10
+```
+
+输出目录：
+
+```text
+data/processed/
+  tlc_manhattan_2025-10.parquet
+  zone_time_matrix_2025-10.parquet
+  manhattan_zone_lookup.csv
+  data_health_report_2025-10.md
+```
+
+`main` 默认使用 TLC Manhattan。`smoke` 在 TLC 缓存不存在时会回退到合成小环境，便于快速检查工程是否可运行。
 
 ## Smoke 运行
 
@@ -64,6 +93,12 @@ configs/default.json
 
 常调参数：
 
+- `environment.scenario_source`
+- `environment.tlc_trip_path`
+- `environment.taxi_zone_lookup_path`
+- `environment.demand_sample_rate`
+- `environment.supply_scale`
+- `environment.max_candidate_vehicles_per_order`
 - `scales.smoke.total_orders`
 - `scales.smoke.candidate_vehicles`
 - `scales.main.total_orders`

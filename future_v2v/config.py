@@ -31,6 +31,19 @@ class EnvironmentConfig:
     profit_scale_fallback: float
     enable_stochastic_acceptance: bool
     enable_stochastic_cancellation: bool
+    scenario_source: str = "synthetic"
+    allow_synthetic_smoke_fallback: bool = True
+    tlc_trip_path: str = ""
+    taxi_zone_lookup_path: str = ""
+    taxi_zone_geo_path: str = ""
+    processed_dir: str = "data/processed"
+    manhattan_only: bool = True
+    travel_time_source: str = "empirical_median"
+    demand_sample_rate: float = 1.0
+    supply_scale: float = 1.0
+    max_candidate_vehicles_per_order: int = 64
+    train_days: list[str] | None = None
+    eval_days: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -99,4 +112,3 @@ def load_project_config(path: str | Path = "configs/default.json") -> ProjectCon
 def resolve_run_dir(config: ProjectConfig, scale_name: str, run_name: str | None = None) -> Path:
     name = run_name or config.experiment.run_name_template.format(scale=scale_name)
     return Path(config.experiment.output_root) / name
-
