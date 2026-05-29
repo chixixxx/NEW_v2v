@@ -112,6 +112,11 @@ def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | s
             arr = np.array([float(item[field]) for item in materialized], dtype=float)
             row[f"{field}_mean"] = float(arr.mean())
             row[f"{field}_std"] = float(arr.std(ddof=0))
+        service_rate = float(row["service_rate_mean"])
+        expired_cancelled = float(row["expired_rate_mean"]) + float(row["cancelled_rate_mean"])
+        mean_batch_interval = float(row["mean_batch_interval_mean"])
+        row["timing_degenerate_risk"] = bool(service_rate > 0.90 and mean_batch_interval <= 1.2)
+        row["environment_target_band"] = bool(0.65 <= service_rate <= 0.82 and 0.08 <= expired_cancelled <= 0.22)
         rows.append(row)
     rows.sort(key=lambda row: float(row["future_v2v_score_mean"]), reverse=True)
     return rows
@@ -127,4 +132,3 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-

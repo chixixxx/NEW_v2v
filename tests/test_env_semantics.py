@@ -11,6 +11,7 @@ def make_env() -> FutureV2VTimingEnv:
         service_kwh_per_tick=5.0,
         pickup_cap_minutes=30.0,
         platform_pickup_cost_per_min=0.0,
+        dispatch_fixed_cost=0.0,
         wait_penalty_per_order_tick=0.0,
         expired_penalty=10.0,
         cancelled_penalty=8.0,
@@ -91,3 +92,11 @@ def test_match_updates_order_vehicle_and_profit() -> None:
     assert info["step_result"].accepted_count == 1
     assert reward > 0.0
 
+
+def test_dispatch_fixed_cost_is_subtracted_from_match_profit() -> None:
+    env = make_env()
+    env.env_config = env.env_config.__class__(**{**env.env_config.__dict__, "dispatch_fixed_cost": 7.0})
+    env.matcher.env_config = env.env_config
+    install_single_order_vehicle(env, max_wait_ticks=2)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH)
+    assert info["step_result"].platform_profit == env.orders[0].realized_profit - 7.0

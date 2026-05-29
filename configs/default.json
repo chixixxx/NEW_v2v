@@ -1,6 +1,6 @@
 {
   "experiment": {
-    "minutes_per_tick": 5,
+    "minutes_per_tick": 3,
     "output_root": "outputs",
     "run_name_template": "{scale}_latest"
   },
@@ -14,14 +14,17 @@
     "processed_dir": "data/processed",
     "manhattan_only": true,
     "travel_time_source": "empirical_median",
+    "tick_minutes": 3,
+    "time_bucket_minutes": 60,
     "demand_sample_rate": 0.35,
-    "supply_scale": 1.0,
-    "max_candidate_vehicles_per_order": 64,
+    "supply_scale": 0.50,
+    "max_candidate_vehicles_per_order": 20,
     "train_days": [],
     "eval_days": [],
-    "service_kwh_per_tick": 4.5,
+    "service_kwh_per_tick": 2.7,
     "pickup_cap_minutes": 18.0,
     "platform_pickup_cost_per_min": 0.06,
+    "dispatch_fixed_cost": 2.0,
     "wait_penalty_per_order_tick": 0.03,
     "expired_penalty": 10.0,
     "cancelled_penalty": 8.0,
@@ -37,8 +40,8 @@
   },
   "scales": {
     "smoke": {
-      "horizon_ticks": 36,
-      "terminal_buffer_ticks": 4,
+      "horizon_ticks": 60,
+      "terminal_buffer_ticks": 8,
       "total_orders": 80,
       "candidate_vehicles": 120,
       "vehicle_join_probability": 0.55,
@@ -47,11 +50,11 @@
       "eval_episodes": 8
     },
     "main": {
-      "horizon_ticks": 48,
-      "terminal_buffer_ticks": 8,
+      "horizon_ticks": 80,
+      "terminal_buffer_ticks": 14,
       "total_orders": 1600,
-      "candidate_vehicles": 2100,
-      "vehicle_join_probability": 0.44,
+      "candidate_vehicles": 1900,
+      "vehicle_join_probability": 0.36,
       "fleet_probability": 0.09,
       "train_episodes": 300,
       "eval_episodes": 40
@@ -70,6 +73,7 @@
     "teacher_prefill_episodes": 8,
     "hidden_dim": 128,
     "double_dqn": true,
-    "prioritized_replay": true
+    "prioritized_replay": true,
+    "rollout_workers": 4
   }
 }

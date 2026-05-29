@@ -20,10 +20,9 @@ REQUIRED_TRIP_COLUMNS = (
     "total_amount",
 )
 
-TIME_BUCKET_TICKS = 12
-TICKS_PER_DAY = 24 * 60 // 5
+MINUTES_PER_DAY = 24 * 60
 
-_CACHE: dict[tuple[str, str, str], TLCManhattanData] = {}
+_CACHE: dict[tuple[str, str, str, int, int], TLCManhattanData] = {}
 
 
 @dataclass(frozen=True)
@@ -40,6 +39,8 @@ class TLCManhattanData:
     trip_rows: pd.DataFrame
     zone_time_matrix: pd.DataFrame
     zone_lookup: pd.DataFrame
+    tick_minutes: int = 3
+    time_bucket_minutes: int = 60
 
     def __post_init__(self) -> None:
         self._time_lookup = {
@@ -71,6 +72,14 @@ class TLCManhattanData:
     def global_median_duration_minutes(self) -> float:
         return float(self.trip_rows["duration_minutes"].median())
 
+    @property
+    def ticks_per_day(self) -> int:
+        return MINUTES_PER_DAY // self.tick_minutes
+
+    @property
+    def time_bucket_ticks(self) -> int:
+        return max(1, self.time_bucket_minutes // self.tick_minutes)
+
     def rows_for_window(self, day: str, start_tick_day: int, horizon_ticks: int) -> pd.DataFrame:
         end_tick = start_tick_day + horizon_ticks
         mask = (
@@ -86,7 +95,7 @@ class TLCManhattanData:
         return self.trip_rows.loc[mask]
 
     def travel_minutes(self, origin_zone: int, destination_zone: int, tick_day: int) -> float:
-        bucket = int((tick_day % TICKS_PER_DAY) // TIME_BUCKET_TICKS)
+        bucket = int((tick_day % self.ticks_per_day) // self.time_bucket_ticks)
         exact = self._time_lookup.get((int(origin_zone), int(destination_zone), bucket))
         if exact is not None:
             return exact
@@ -99,14 +108,15 @@ class TLCManhattanData:
         return self.global_median_duration_minutes
 
     def zone_pressure(self, origin_zone: int, tick_day: int) -> float:
-        bucket = int((tick_day % TICKS_PER_DAY) // TIME_BUCKET_TICKS)
+        bucket = int((tick_day % self.ticks_per_day) // self.time_bucket_ticks)
         pressure = self._zone_pressure_lookup.get((int(origin_zone), bucket), 1.0)
         return float(np.clip(pressure, 0.5, 2.5))
 
 
 def processed_paths(env_config: EnvironmentConfig, month: str | None = None) -> TLCProcessedPaths:
     processed_dir = Path(env_config.processed_dir)
-    suffix = month or _infer_month_from_path(env_config.tlc_trip_path) or "month"
+    month_suffix = month or _infer_month_from_path(env_config.tlc_trip_path) or "month"
+    suffix = f"{month_suffix}_tick{env_config.tick_minutes}m"
     return TLCProcessedPaths(
         trip_rows=processed_dir / f"tlc_manhattan_{suffix}.parquet",
         zone_time_matrix=processed_dir / f"zone_time_matrix_{suffix}.parquet",
@@ -118,7 +128,13 @@ def processed_paths(env_config: EnvironmentConfig, month: str | None = None) -> 
 
 def load_tlc_manhattan_data(env_config: EnvironmentConfig) -> TLCManhattanData:
     paths = processed_paths(env_config)
-    cache_key = (str(paths.trip_rows.resolve()), str(paths.zone_time_matrix.resolve()), str(paths.zone_lookup.resolve()))
+    cache_key = (
+        str(paths.trip_rows.resolve()),
+        str(paths.zone_time_matrix.resolve()),
+        str(paths.zone_lookup.resolve()),
+        env_config.tick_minutes,
+        env_config.time_bucket_minutes,
+    )
     if cache_key in _CACHE:
         return _CACHE[cache_key]
     if not paths.trip_rows.exists() or not paths.zone_time_matrix.exists() or not paths.zone_lookup.exists():
@@ -131,6 +147,8 @@ def load_tlc_manhattan_data(env_config: EnvironmentConfig) -> TLCManhattanData:
         trip_rows=pd.read_parquet(paths.trip_rows),
         zone_time_matrix=pd.read_parquet(paths.zone_time_matrix),
         zone_lookup=pd.read_csv(paths.zone_lookup),
+        tick_minutes=env_config.tick_minutes,
+        time_bucket_minutes=env_config.time_bucket_minutes,
     )
     _CACHE[cache_key] = data
     return data
@@ -143,10 +161,15 @@ def prepare_tlc_manhattan(
     processed_dir: str | Path,
     month: str | None = None,
     manhattan_only: bool = True,
-    tick_minutes: int = 5,
+    tick_minutes: int = 3,
+    time_bucket_minutes: int = 60,
 ) -> TLCProcessedPaths:
-    if tick_minutes != 5:
-        raise ValueError("The current TLC adapter expects 5-minute ticks.")
+    if MINUTES_PER_DAY % tick_minutes != 0:
+        raise ValueError(f"tick_minutes must divide 1440 exactly, got {tick_minutes}")
+    if time_bucket_minutes % tick_minutes != 0:
+        raise ValueError(
+            f"time_bucket_minutes must be a multiple of tick_minutes, got {time_bucket_minutes} and {tick_minutes}"
+        )
     trip_path = Path(trip_path)
     zone_lookup_path = Path(zone_lookup_path)
     if not trip_path.exists():
@@ -155,9 +178,10 @@ def prepare_tlc_manhattan(
         raise FileNotFoundError(f"TLC taxi zone lookup not found: {zone_lookup_path}")
     env_stub = EnvironmentConfig(
         zone_count=16,
-        service_kwh_per_tick=4.5,
+        service_kwh_per_tick=2.7,
         pickup_cap_minutes=18.0,
         platform_pickup_cost_per_min=0.06,
+        dispatch_fixed_cost=2.0,
         wait_penalty_per_order_tick=0.03,
         expired_penalty=10.0,
         cancelled_penalty=8.0,
@@ -172,6 +196,8 @@ def prepare_tlc_manhattan(
         enable_stochastic_cancellation=True,
         processed_dir=str(processed_dir),
         tlc_trip_path=str(trip_path),
+        tick_minutes=tick_minutes,
+        time_bucket_minutes=time_bucket_minutes,
     )
     out = processed_paths(env_stub, month=month)
     out.trip_rows.parent.mkdir(parents=True, exist_ok=True)
@@ -187,9 +213,10 @@ def prepare_tlc_manhattan(
     filtered["pu_zone"] = filtered["PULocationID"].map(zone_id_to_index).astype(int)
     filtered["do_zone"] = filtered["DOLocationID"].map(zone_id_to_index).astype(int)
     filtered["pickup_date"] = filtered["tpep_pickup_datetime"].dt.strftime("%Y-%m-%d")
-    filtered["pickup_tick_day"] = _tick_day(filtered["tpep_pickup_datetime"])
-    filtered["dropoff_tick_day"] = _tick_day(filtered["tpep_dropoff_datetime"])
-    filtered["time_bucket"] = (filtered["pickup_tick_day"] // TIME_BUCKET_TICKS).astype(int)
+    filtered["pickup_tick_day"] = _tick_day(filtered["tpep_pickup_datetime"], tick_minutes)
+    filtered["dropoff_tick_day"] = _tick_day(filtered["tpep_dropoff_datetime"], tick_minutes)
+    time_bucket_ticks = max(1, time_bucket_minutes // tick_minutes)
+    filtered["time_bucket"] = (filtered["pickup_tick_day"] // time_bucket_ticks).astype(int)
     filtered["demand_kwh_base"] = np.clip(
         3.5 + 0.38 * filtered["trip_distance"] + 0.12 * filtered["duration_minutes"],
         3.0,
@@ -237,7 +264,14 @@ def prepare_tlc_manhattan(
     trip_rows.to_parquet(out.trip_rows, index=False)
     time_matrix.to_parquet(out.zone_time_matrix, index=False)
     manhattan_lookup.to_csv(out.zone_lookup, index=False)
-    health = _health_rows(raw_count=len(raw), filtered=trip_rows, lookup=manhattan_lookup, time_matrix=time_matrix)
+    health = _health_rows(
+        raw_count=len(raw),
+        filtered=trip_rows,
+        lookup=manhattan_lookup,
+        time_matrix=time_matrix,
+        tick_minutes=tick_minutes,
+        time_bucket_minutes=time_bucket_minutes,
+    )
     pd.DataFrame([health]).to_csv(out.health_summary, index=False)
     out.health_report.write_text(_health_report(health, out), encoding="utf-8")
     return out
@@ -281,8 +315,8 @@ def _clean_trip_rows(df: pd.DataFrame, allowed_location_ids: set[int], month: st
     return work.loc[mask].copy()
 
 
-def _tick_day(series: pd.Series) -> pd.Series:
-    return ((series.dt.hour * 60 + series.dt.minute) // 5).astype(int)
+def _tick_day(series: pd.Series, tick_minutes: int) -> pd.Series:
+    return ((series.dt.hour * 60 + series.dt.minute) // tick_minutes).astype(int)
 
 
 def _infer_month_from_path(path: str) -> str | None:
@@ -296,9 +330,15 @@ def _health_rows(
     filtered: pd.DataFrame,
     lookup: pd.DataFrame,
     time_matrix: pd.DataFrame,
+    tick_minutes: int,
+    time_bucket_minutes: int,
 ) -> dict[str, float | int | str]:
-    possible_pairs = max(1, len(lookup) * len(lookup) * (TICKS_PER_DAY // TIME_BUCKET_TICKS))
+    ticks_per_day = MINUTES_PER_DAY // tick_minutes
+    time_bucket_ticks = max(1, time_bucket_minutes // tick_minutes)
+    possible_pairs = max(1, len(lookup) * len(lookup) * (ticks_per_day // time_bucket_ticks))
     return {
+        "tick_minutes": tick_minutes,
+        "time_bucket_minutes": time_bucket_minutes,
         "raw_rows": raw_count,
         "manhattan_clean_rows": len(filtered),
         "retained_ratio": len(filtered) / max(1, raw_count),
@@ -323,10 +363,7 @@ def _health_report(health: dict[str, float | int | str], paths: TLCProcessedPath
         "| --- | --- |",
     ]
     for key, value in health.items():
-        if isinstance(value, float):
-            rendered = f"{value:.6f}"
-        else:
-            rendered = str(value)
+        rendered = f"{value:.6f}" if isinstance(value, float) else str(value)
         lines.append(f"| {key} | {rendered} |")
     lines.extend(
         [
@@ -339,3 +376,4 @@ def _health_report(health: dict[str, float | int | str], paths: TLCProcessedPath
         ]
     )
     return "\n".join(lines) + "\n"
+

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from future_v2v.algorithms.baselines import default_baselines, run_policy_episode
+from future_v2v.algorithms.baselines import default_baselines, policy_from_name, run_policy_episode
 from future_v2v.algorithms.dqn import DQNTimingAgent
 from future_v2v.config import ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
@@ -26,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--episodes", type=int, default=None, help="Override training episodes.")
     parser.add_argument("--eval-episodes", type=int, default=None, help="Override evaluation episodes.")
+    parser.add_argument("--rollout-workers", type=int, default=None, help="Parallel rollout workers for DQN training.")
+    parser.add_argument("--eval-workers", type=int, default=1, help="Parallel workers for evaluation.")
     parser.add_argument("--seed", type=int, default=20260529)
     return parser.parse_args()
 
@@ -59,13 +62,28 @@ def run_generate(config: ProjectConfig, scale_name: str, run_dir: Path, seed: in
     )
 
 
-def run_train(config: ProjectConfig, scale_name: str, run_dir: Path, seed: int, episodes: int | None) -> None:
+def run_train(
+    config: ProjectConfig,
+    scale_name: str,
+    run_dir: Path,
+    seed: int,
+    episodes: int | None,
+    rollout_workers: int | None,
+) -> None:
     env_factory = make_env_factory(config, scale_name, seed)
     env = env_factory()
     obs, _ = env.reset(seed=seed)
     train_episodes = episodes or config.scale(scale_name).train_episodes
+    worker_count = max(1, int(rollout_workers or config.training.rollout_workers))
     agent = DQNTimingAgent(obs_dim=len(obs), training_config=config.training)
-    history = agent.train(env_factory, episodes=train_episodes, seed_start=seed)
+    history = agent.train(
+        env_factory,
+        episodes=train_episodes,
+        seed_start=seed,
+        rollout_workers=worker_count,
+        env_config=config.environment,
+        scale_config=config.scale(scale_name),
+    )
     write_csv(run_dir / "train" / "train_history.csv", history)
     agent.save(run_dir / "train" / "dqn_timing_agent.pt")
     write_markdown_report(
@@ -73,27 +91,41 @@ def run_train(config: ProjectConfig, scale_name: str, run_dir: Path, seed: int, 
         title=f"DQN Timing Training ({scale_name})",
         summary_lines=[
             "训练目标是学习 WAIT/MATCH 时机，匹配边仍由约束优化器决定。",
-            f"episodes={train_episodes}, replay_prefill={config.training.teacher_prefill_episodes}",
+            f"episodes={train_episodes}, replay_prefill={config.training.teacher_prefill_episodes}, rollout_workers={worker_count}",
         ],
         table_rows=history[-10:],
     )
 
 
-def run_eval(config: ProjectConfig, scale_name: str, run_dir: Path, seed: int, eval_episodes: int | None) -> None:
+def run_eval(
+    config: ProjectConfig,
+    scale_name: str,
+    run_dir: Path,
+    seed: int,
+    eval_episodes: int | None,
+    eval_workers: int,
+) -> None:
     scale = config.scale(scale_name)
     count = eval_episodes or scale.eval_episodes
-    policies = list(default_baselines())
+    policy_specs: list[tuple[str, str]] = [("baseline", policy.name) for policy in default_baselines()]
     checkpoint = run_dir / "train" / "dqn_timing_agent.pt"
     if checkpoint.exists():
-        env = make_env_factory(config, scale_name, seed)()
-        obs, _ = env.reset(seed=seed)
-        policies.append(DQNTimingAgent.load(checkpoint, config.training))
-        _ = obs
-    all_metrics: list[EpisodeMetrics] = []
-    tasks = [(policy, idx) for policy in policies for idx in range(count)]
-    for policy, idx in progress(tasks, desc="eval policies", total=len(tasks), unit="episode"):
-        env = make_env_factory(config, scale_name, seed + idx)()
-        all_metrics.append(run_policy_episode(env, policy, seed=seed + idx))
+        policy_specs.append(("dqn", str(checkpoint)))
+    tasks = [(policy_spec, idx) for policy_spec in policy_specs for idx in range(count)]
+    if eval_workers > 1:
+        with ProcessPoolExecutor(max_workers=eval_workers) as executor:
+            futures = [
+                executor.submit(_run_eval_task, config, scale_name, seed + idx, policy_spec)
+                for policy_spec, idx in tasks
+            ]
+            all_metrics = [
+                future.result()
+                for future in progress(futures, desc="eval policies", total=len(futures), unit="episode")
+            ]
+    else:
+        all_metrics = []
+        for policy_spec, idx in progress(tasks, desc="eval policies", total=len(tasks), unit="episode"):
+            all_metrics.append(_run_eval_task(config, scale_name, seed + idx, policy_spec))
     detail_rows = [metric.to_row() for metric in all_metrics]
     summary_rows = summarize_metrics(all_metrics)
     write_csv(run_dir / "eval" / "episode_metrics.csv", detail_rows)
@@ -103,7 +135,8 @@ def run_eval(config: ProjectConfig, scale_name: str, run_dir: Path, seed: int, e
         title=f"Future V2V Timing Evaluation ({scale_name})",
         summary_lines=[
             "主表按 future_v2v_score_mean 排序；profit、服务率、取消和过期是辅助解释指标。",
-            f"episodes_per_policy={count}",
+            "timing_degenerate_risk=True 表示策略可能退化为过于频繁的一步匹配。",
+            f"episodes_per_policy={count}, eval_workers={eval_workers}",
         ],
         table_rows=summary_rows,
     )
@@ -132,6 +165,25 @@ def run_report(run_dir: Path) -> None:
     (report_dir / "run_report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _run_eval_task(
+    config: ProjectConfig,
+    scale_name: str,
+    seed: int,
+    policy_spec: tuple[str, str],
+) -> EpisodeMetrics:
+    env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed)
+    kind, value = policy_spec
+    if kind == "baseline":
+        policy = policy_from_name(value)
+    elif kind == "dqn":
+        obs, _ = env.reset(seed=seed)
+        policy = DQNTimingAgent.load(Path(value), config.training)
+        _ = obs
+    else:
+        raise ValueError(f"unknown policy spec kind: {kind}")
+    return run_policy_episode(env, policy, seed=seed)
+
+
 def main() -> None:
     args = parse_args()
     config = load_project_config(args.config)
@@ -140,8 +192,15 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     if args.stage == "smoke":
         run_generate(config, scale_name, run_dir, args.seed, eval_episodes=3)
-        run_train(config, scale_name, run_dir, args.seed, episodes=args.episodes or 5)
-        run_eval(config, scale_name, run_dir, args.seed, eval_episodes=args.eval_episodes or 3)
+        run_train(
+            config,
+            scale_name,
+            run_dir,
+            args.seed,
+            episodes=args.episodes or 5,
+            rollout_workers=args.rollout_workers,
+        )
+        run_eval(config, scale_name, run_dir, args.seed, eval_episodes=args.eval_episodes or 3, eval_workers=args.eval_workers)
         run_report(run_dir)
         return
     stages = ["generate", "train", "eval", "report"] if args.stage == "all" else [args.stage]
@@ -149,9 +208,9 @@ def main() -> None:
         if stage == "generate":
             run_generate(config, scale_name, run_dir, args.seed, args.eval_episodes)
         elif stage == "train":
-            run_train(config, scale_name, run_dir, args.seed, args.episodes)
+            run_train(config, scale_name, run_dir, args.seed, args.episodes, args.rollout_workers)
         elif stage == "eval":
-            run_eval(config, scale_name, run_dir, args.seed, args.eval_episodes)
+            run_eval(config, scale_name, run_dir, args.seed, args.eval_episodes, args.eval_workers)
         elif stage == "report":
             run_report(run_dir)
 

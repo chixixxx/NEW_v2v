@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from future_v2v.config import EnvironmentConfig, ScaleConfig
-from future_v2v.data.tlc_manhattan import TLCManhattanData, TICKS_PER_DAY
+from future_v2v.data.tlc_manhattan import TLCManhattanData
 from future_v2v.simulation.entities import Order, Vehicle
 from future_v2v.simulation.generator import Scenario
 
@@ -32,7 +32,7 @@ class TLCManhattanScenarioGenerator:
     def _select_window(self, rng: np.random.Generator) -> tuple[str, int, pd.DataFrame]:
         available_days = self._eligible_days()
         horizon = self.scale_config.horizon_ticks
-        latest_start = max(0, TICKS_PER_DAY - horizon)
+        latest_start = max(0, self.data.ticks_per_day - horizon)
         best: tuple[str, int, pd.DataFrame] | None = None
         for _ in range(16):
             day = str(rng.choice(available_days))
@@ -122,7 +122,10 @@ class TLCManhattanScenarioGenerator:
                 join_tick = int(np.clip(int(source_row.dropoff_tick_day) - start_tick_day, 0, self.scale_config.horizon_ticks - 1))
                 current_zone = int(source_row.do_zone)
                 destination_zone = int(source_row.pu_zone)
-            online_duration = int(rng.integers(16, 38) if not fleet else rng.integers(30, 58))
+            if fleet:
+                online_duration = int(rng.integers(150, 290) / self.env_config.tick_minutes)
+            else:
+                online_duration = int(rng.integers(80, 190) / self.env_config.tick_minutes)
             leave_tick = min(horizon, join_tick + online_duration)
             if leave_tick <= join_tick:
                 leave_tick = min(horizon, join_tick + 1)
@@ -152,14 +155,17 @@ class TLCManhattanScenarioGenerator:
         vehicles.sort(key=lambda vehicle: (vehicle.join_tick, vehicle.vehicle_id))
         return vehicles
 
-    @staticmethod
-    def _sample_wait_ticks(pressure: float, rng: np.random.Generator) -> int:
+    def _sample_wait_ticks(self, pressure: float, rng: np.random.Generator) -> int:
         if pressure >= 1.45:
-            choices = np.array([2, 3, 4, 5, 6, 8])
-            probs = np.array([0.12, 0.18, 0.24, 0.20, 0.16, 0.10])
+            minute_choices = np.array([6, 9, 12, 15])
+            probs = np.array([0.18, 0.28, 0.32, 0.22])
+        elif pressure <= 0.8:
+            minute_choices = np.array([24, 30, 36, 45, 54])
+            probs = np.array([0.18, 0.26, 0.26, 0.18, 0.12])
         else:
-            choices = np.array([4, 5, 6, 8, 10, 12])
-            probs = np.array([0.10, 0.14, 0.20, 0.24, 0.20, 0.12])
+            minute_choices = np.array([12, 18, 24, 30, 36])
+            probs = np.array([0.14, 0.22, 0.26, 0.22, 0.16])
+        choices = np.maximum(1, np.ceil(minute_choices / self.env_config.tick_minutes).astype(int))
         return int(rng.choice(choices, p=probs / probs.sum()))
 
     @staticmethod

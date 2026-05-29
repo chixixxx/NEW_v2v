@@ -119,7 +119,7 @@ class FutureV2VTimingEnv:
             result.matched_count = len(realized)
             result.accepted_count = len(accepted)
             result.rejected_count = len(realized) - len(accepted)
-            result.platform_profit = float(sum(match.realized_profit for match in accepted))
+            result.platform_profit = float(sum(match.realized_profit for match in accepted) - self.env_config.dispatch_fixed_cost)
             if accepted:
                 result.mean_pickup_minutes = float(np.mean([match.pickup_minutes for match in accepted]))
                 result.mean_commitment_ticks = float(np.mean([match.total_commitment_ticks for match in accepted]))
@@ -339,12 +339,12 @@ class FutureV2VTimingEnv:
         if self.env_config.scenario_source == "tlc_manhattan":
             try:
                 data = load_tlc_manhattan_data(self.env_config)
-                network = TLCManhattanZoneNetwork(data=data)
+                network = TLCManhattanZoneNetwork(data=data, minutes_per_tick=self.env_config.tick_minutes)
                 generator = TLCManhattanScenarioGenerator(self.env_config, self.scale_config, data)
                 return network, generator
             except FileNotFoundError:
                 if not (self.env_config.allow_synthetic_smoke_fallback and self.scale_config.name == "smoke"):
                     raise
-        network = ZoneNetwork(self.env_config.zone_count)
+        network = ZoneNetwork(self.env_config.zone_count, minutes_per_tick=self.env_config.tick_minutes)
         generator = ScenarioGenerator(self.env_config, self.scale_config)
         return network, generator

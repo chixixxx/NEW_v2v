@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import random
+import time
+from concurrent.futures import ProcessPoolExecutor
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +14,7 @@ import torch
 from torch import nn
 
 from future_v2v.algorithms.baselines import TimingPolicy, teacher_policies
-from future_v2v.config import TrainingConfig
+from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig
 from future_v2v.envs.timing_env import MATCH, FutureV2VTimingEnv
 from future_v2v.progress import progress
 
@@ -96,15 +98,30 @@ class DQNTimingAgent:
         env_factory: Callable[[], FutureV2VTimingEnv],
         episodes: int,
         seed_start: int = 10_000,
+        rollout_workers: int = 1,
+        env_config: EnvironmentConfig | None = None,
+        scale_config: ScaleConfig | None = None,
     ) -> list[dict[str, float | int]]:
         self._teacher_prefill(env_factory, seed_start)
+        if rollout_workers > 1:
+            if env_config is None or scale_config is None:
+                raise ValueError("parallel rollout training requires env_config and scale_config")
+            return self._train_parallel_rollouts(
+                episodes=episodes,
+                seed_start=seed_start,
+                rollout_workers=rollout_workers,
+                env_config=env_config,
+                scale_config=scale_config,
+            )
         history: list[dict[str, float | int]] = []
         for episode in progress(range(episodes), desc="train DQN episodes", total=episodes, unit="episode"):
+            episode_started_at = time.perf_counter()
             env: FutureV2VTimingEnv = env_factory()
             obs, _ = env.reset(seed=seed_start + 1000 + episode)
             terminated = False
             truncated = False
             episode_reward = 0.0
+            step_count = 0
             loss_values: list[float] = []
             while not (terminated or truncated):
                 epsilon = self._epsilon()
@@ -114,12 +131,14 @@ class DQNTimingAgent:
                 self.replay.add(Transition(obs, action, reward, next_obs, terminated or truncated, priority))
                 obs = next_obs
                 episode_reward += reward
+                step_count += 1
                 self.global_step += 1
                 if len(self.replay) >= self.config.min_replay_size:
                     loss_values.append(self._optimize_step())
                 if self.global_step % self.config.target_update_interval == 0:
                     self.target.load_state_dict(self.online.state_dict())
             metrics = env.episode_metrics(policy_name=self.name, seed=seed_start + 1000 + episode)
+            elapsed = max(1e-9, time.perf_counter() - episode_started_at)
             history.append(
                 {
                     "episode": episode,
@@ -130,9 +149,79 @@ class DQNTimingAgent:
                     "platform_profit": metrics.platform_profit,
                     "service_rate": metrics.service_rate,
                     "dispatch_epoch_count": metrics.dispatch_epoch_count,
+                    "steps_per_sec": step_count / elapsed,
+                    "episodes_per_sec": 1.0 / elapsed,
+                    "rollout_worker_count": 1,
+                    "replay_size": len(self.replay),
                 }
             )
         return history
+
+    def _train_parallel_rollouts(
+        self,
+        *,
+        episodes: int,
+        seed_start: int,
+        rollout_workers: int,
+        env_config: EnvironmentConfig,
+        scale_config: ScaleConfig,
+    ) -> list[dict[str, float | int]]:
+        history: list[dict[str, float | int]] = []
+        episode_ids = list(range(episodes))
+        with ProcessPoolExecutor(max_workers=rollout_workers) as executor:
+            for offset in progress(
+                range(0, episodes, rollout_workers),
+                desc="train parallel rollout batches",
+                total=math.ceil(episodes / rollout_workers),
+                unit="batch",
+            ):
+                batch_ids = episode_ids[offset : offset + rollout_workers]
+                state_dict = {key: value.detach().cpu() for key, value in self.online.state_dict().items()}
+                epsilon = self._epsilon()
+                started_at = time.perf_counter()
+                futures = [
+                    executor.submit(
+                        _run_dqn_rollout_task,
+                        env_config,
+                        scale_config,
+                        self.config,
+                        state_dict,
+                        seed_start + 1000 + episode,
+                        epsilon,
+                    )
+                    for episode in batch_ids
+                ]
+                for episode, future in zip(batch_ids, futures):
+                    result = future.result()
+                    transitions: list[Transition] = result["transitions"]
+                    loss_values: list[float] = []
+                    for transition in transitions:
+                        self.replay.add(transition)
+                        self.global_step += 1
+                        if len(self.replay) >= self.config.min_replay_size:
+                            loss_values.append(self._optimize_step())
+                        if self.global_step % self.config.target_update_interval == 0:
+                            self.target.load_state_dict(self.online.state_dict())
+                    elapsed = max(1e-9, time.perf_counter() - started_at)
+                    steps = len(transitions)
+                    metrics = result["metrics"]
+                    history.append(
+                        {
+                            "episode": episode,
+                            "reward": float(result["episode_reward"]),
+                            "loss": float(np.mean(loss_values)) if loss_values else 0.0,
+                            "epsilon": epsilon,
+                            "future_v2v_score": metrics.future_v2v_score,
+                            "platform_profit": metrics.platform_profit,
+                            "service_rate": metrics.service_rate,
+                            "dispatch_epoch_count": metrics.dispatch_epoch_count,
+                            "steps_per_sec": steps / elapsed,
+                            "episodes_per_sec": max(1, len(batch_ids)) / elapsed,
+                            "rollout_worker_count": rollout_workers,
+                            "replay_size": len(self.replay),
+                        }
+                    )
+        return sorted(history, key=lambda row: int(row["episode"]))
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,3 +287,35 @@ class DQNTimingAgent:
     def _epsilon(self) -> float:
         fraction = min(1.0, self.global_step / max(1, self.config.epsilon_decay_steps))
         return self.config.epsilon_end + (self.config.epsilon_start - self.config.epsilon_end) * math.exp(-4.0 * fraction)
+
+def _run_dqn_rollout_task(
+    env_config: EnvironmentConfig,
+    scale_config: ScaleConfig,
+    training_config: TrainingConfig,
+    state_dict: dict[str, torch.Tensor],
+    seed: int,
+    epsilon: float,
+) -> dict[str, object]:
+    random.seed(seed)
+    np.random.seed(seed % (2**32 - 1))
+    torch.manual_seed(seed)
+    env = FutureV2VTimingEnv(env_config, scale_config, seed=seed)
+    obs, _ = env.reset(seed=seed)
+    agent = DQNTimingAgent(obs_dim=len(obs), training_config=training_config, device="cpu")
+    agent.online.load_state_dict(state_dict)
+    transitions: list[Transition] = []
+    terminated = False
+    truncated = False
+    episode_reward = 0.0
+    while not (terminated or truncated):
+        action = agent.act(env, obs, epsilon=epsilon)
+        next_obs, reward, terminated, truncated, _info = env.step(action)
+        priority = 1.0 + abs(reward) / 20.0 + (0.5 if action == MATCH else 0.0)
+        transitions.append(Transition(obs, action, reward, next_obs, terminated or truncated, priority))
+        obs = next_obs
+        episode_reward += reward
+    return {
+        "transitions": transitions,
+        "episode_reward": episode_reward,
+        "metrics": env.episode_metrics(policy_name=DQNTimingAgent.name, seed=seed),
+    }

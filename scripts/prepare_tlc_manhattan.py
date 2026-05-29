@@ -36,6 +36,7 @@ def main() -> None:
         month=args.month,
         manhattan_only=env.manhattan_only,
         tick_minutes=config.experiment.minutes_per_tick,
+        time_bucket_minutes=env.time_bucket_minutes,
     )
     print("Prepared TLC Manhattan data:")
     print(f"  trip rows: {paths.trip_rows}")
@@ -46,4 +47,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -19,6 +19,7 @@ class EnvironmentConfig:
     service_kwh_per_tick: float
     pickup_cap_minutes: float
     platform_pickup_cost_per_min: float
+    dispatch_fixed_cost: float
     wait_penalty_per_order_tick: float
     expired_penalty: float
     cancelled_penalty: float
@@ -39,6 +40,8 @@ class EnvironmentConfig:
     processed_dir: str = "data/processed"
     manhattan_only: bool = True
     travel_time_source: str = "empirical_median"
+    tick_minutes: int = 3
+    time_bucket_minutes: int = 60
     demand_sample_rate: float = 1.0
     supply_scale: float = 1.0
     max_candidate_vehicles_per_order: int = 64
@@ -74,6 +77,7 @@ class TrainingConfig:
     hidden_dim: int
     double_dqn: bool
     prioritized_replay: bool
+    rollout_workers: int = 1
 
 
 @dataclass(frozen=True)
@@ -97,13 +101,17 @@ def load_project_config(path: str | Path = "configs/default.json") -> ProjectCon
     config_path = Path(path)
     with config_path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
+    env_raw = dict(raw["environment"])
+    env_raw.setdefault("tick_minutes", raw["experiment"]["minutes_per_tick"])
+    if int(env_raw["tick_minutes"]) != int(raw["experiment"]["minutes_per_tick"]):
+        raise ValueError("environment.tick_minutes must match experiment.minutes_per_tick")
     scales = {
         name: ScaleConfig(name=name, **scale_data)
         for name, scale_data in raw["scales"].items()
     }
     return ProjectConfig(
         experiment=_read_dataclass(ExperimentConfig, raw["experiment"]),
-        environment=_read_dataclass(EnvironmentConfig, raw["environment"]),
+        environment=_read_dataclass(EnvironmentConfig, env_raw),
         scales=scales,
         training=_read_dataclass(TrainingConfig, raw["training"]),
     )

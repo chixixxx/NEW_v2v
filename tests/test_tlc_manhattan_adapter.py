@@ -54,9 +54,10 @@ def make_tlc_files(tmp_path: Path) -> tuple[Path, Path]:
 def make_env_config(tmp_path: Path, trip_path: Path, lookup_path: Path) -> EnvironmentConfig:
     return EnvironmentConfig(
         zone_count=16,
-        service_kwh_per_tick=4.5,
+        service_kwh_per_tick=2.7,
         pickup_cap_minutes=18.0,
         platform_pickup_cost_per_min=0.06,
+        dispatch_fixed_cost=2.0,
         wait_penalty_per_order_tick=0.03,
         expired_penalty=10.0,
         cancelled_penalty=8.0,
@@ -73,6 +74,8 @@ def make_env_config(tmp_path: Path, trip_path: Path, lookup_path: Path) -> Envir
         tlc_trip_path=str(trip_path),
         taxi_zone_lookup_path=str(lookup_path),
         processed_dir=str(tmp_path / "processed"),
+        tick_minutes=3,
+        time_bucket_minutes=60,
         demand_sample_rate=1.0,
     )
 
@@ -84,10 +87,14 @@ def test_prepare_tlc_manhattan_filters_and_maps_zones(tmp_path: Path) -> None:
         zone_lookup_path=lookup_path,
         processed_dir=tmp_path / "processed",
         month="2025-10",
+        tick_minutes=3,
+        time_bucket_minutes=60,
     )
     rows = pd.read_parquet(paths.trip_rows)
     zones = pd.read_csv(paths.zone_lookup)
     assert len(rows) == 8
+    assert int(rows.iloc[0]["pickup_tick_day"]) == 160
+    assert int(rows.iloc[0]["time_bucket"]) == 8
     assert set(rows["pu_zone"].unique()) == {0, 1}
     assert len(zones) == 2
     assert paths.health_report.exists()
@@ -101,9 +108,11 @@ def test_tlc_environment_generates_reproducible_scenario(tmp_path: Path) -> None
         zone_lookup_path=lookup_path,
         processed_dir=env_config.processed_dir,
         month="2025-10",
+        tick_minutes=env_config.tick_minutes,
+        time_bucket_minutes=env_config.time_bucket_minutes,
     )
     data = load_tlc_manhattan_data(env_config)
-    assert data.travel_minutes(0, 1, 96) > 0.0
+    assert data.travel_minutes(0, 1, 160) > 0.0
     scale = ScaleConfig(
         name="unit",
         horizon_ticks=12,
@@ -121,4 +130,3 @@ def test_tlc_environment_generates_reproducible_scenario(tmp_path: Path) -> None
     env_b.reset(seed=11)
     assert [order.arrival_tick for order in env_a.orders] == [order.arrival_tick for order in env_b.orders]
     assert env_a.network.zone_count == 2
-

@@ -109,6 +109,13 @@ def default_baselines() -> list[TimingPolicy]:
     ]
 
 
+def policy_from_name(name: str) -> TimingPolicy:
+    for policy in default_baselines():
+        if policy.name == name:
+            return policy
+    raise KeyError(f"unknown timing baseline policy: {name}")
+
+
 def teacher_policies() -> list[TimingPolicy]:
     return [
         DeadlineTriggerPolicy(),
@@ -125,4 +132,3 @@ def run_policy_episode(env: FutureV2VTimingEnv, policy: TimingPolicy, seed: int)
         action = policy.act(env, obs)
         obs, _reward, terminated, truncated, _info = env.step(action)
     return env.episode_metrics(policy_name=policy.name, seed=seed)
-

@@ -5,13 +5,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from future_v2v.data.tlc_manhattan import TLCManhattanData, TICKS_PER_DAY
+from future_v2v.data.tlc_manhattan import TLCManhattanData
 
 
 @dataclass(frozen=True)
 class ZoneNetwork:
     zone_count: int
-    minutes_per_tick: int = 5
+    minutes_per_tick: int = 3
 
     def __post_init__(self) -> None:
         side = int(math.ceil(math.sqrt(self.zone_count)))
@@ -48,7 +48,7 @@ class ZoneNetwork:
 
 
 class TLCManhattanZoneNetwork:
-    def __init__(self, data: TLCManhattanData, minutes_per_tick: int = 5) -> None:
+    def __init__(self, data: TLCManhattanData, minutes_per_tick: int = 3) -> None:
         self.data = data
         self.zone_count = data.zone_count
         self.minutes_per_tick = minutes_per_tick
@@ -62,13 +62,13 @@ class TLCManhattanZoneNetwork:
         return max(1.0, minutes / max(1.0, self.minutes_per_tick))
 
     def traffic_multiplier(self, tick: int) -> float:
-        tick_day = (self.scenario_start_tick_day + tick) % TICKS_PER_DAY
+        tick_day = (self.scenario_start_tick_day + tick) % self.data.ticks_per_day
         local = self.data.travel_minutes(0, 0, tick_day)
         global_median = max(1.0, self.data.global_median_duration_minutes)
         return float(np.clip(local / global_median, 0.6, 2.2))
 
     def travel_ticks(self, origin_zone: int, destination_zone: int, tick: int) -> float:
-        tick_day = (self.scenario_start_tick_day + tick) % TICKS_PER_DAY
+        tick_day = (self.scenario_start_tick_day + tick) % self.data.ticks_per_day
         minutes = self.data.travel_minutes(origin_zone, destination_zone, tick_day)
         return max(0.4, minutes / self.minutes_per_tick)
 

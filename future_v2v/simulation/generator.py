@@ -47,7 +47,8 @@ class ScenarioGenerator:
     def _generate_orders(self, rng: np.random.Generator) -> list[Order]:
         ticks = self._arrival_ticks(rng, self.scale_config.total_orders)
         orders: list[Order] = []
-        wait_choices = np.array([2, 3, 4, 5, 6, 8, 10, 12])
+        wait_minutes = np.array([6, 9, 12, 15, 18, 24, 30, 36])
+        wait_choices = np.ceil(wait_minutes / self.env_config.tick_minutes).astype(int)
         wait_probs = np.array([0.06, 0.09, 0.12, 0.15, 0.18, 0.20, 0.14, 0.06])
         wait_probs = wait_probs / wait_probs.sum()
         for order_id, tick in enumerate(ticks):
@@ -82,7 +83,10 @@ class ScenarioGenerator:
                 continue
             fleet = bool(rng.random() < self.scale_config.fleet_probability)
             join_tick = int(np.clip(rng.normal(0.20 * horizon, 0.22 * horizon), 0, self.scale_config.horizon_ticks - 1))
-            online_duration = int(rng.integers(18, 42) if not fleet else rng.integers(32, 58))
+            if fleet:
+                online_duration = int(rng.integers(150, 290) / self.env_config.tick_minutes)
+            else:
+                online_duration = int(rng.integers(80, 190) / self.env_config.tick_minutes)
             leave_tick = min(horizon, join_tick + online_duration)
             capacity = float(rng.choice([55.0, 65.0, 75.0, 90.0, 105.0]))
             soc_ratio = float(rng.uniform(0.48, 0.88 if fleet else 0.80))
