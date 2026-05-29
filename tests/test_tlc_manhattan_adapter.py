@@ -136,3 +136,31 @@ def test_tlc_environment_generates_reproducible_scenario(tmp_path: Path) -> None
     env_b.reset(seed=11)
     assert [order.arrival_tick for order in env_a.orders] == [order.arrival_tick for order in env_b.orders]
     assert env_a.network.zone_count == 2
+
+
+def test_tlc_environment_keeps_configured_order_count_with_sparse_windows(tmp_path: Path) -> None:
+    trip_path, lookup_path = make_tlc_files(tmp_path)
+    env_config = make_env_config(tmp_path, trip_path, lookup_path)
+    prepare_tlc_manhattan(
+        trip_path=trip_path,
+        zone_lookup_path=lookup_path,
+        processed_dir=env_config.processed_dir,
+        month="2025-10",
+        tick_minutes=env_config.tick_minutes,
+        time_bucket_minutes=env_config.time_bucket_minutes,
+    )
+    scale = ScaleConfig(
+        name="unit",
+        horizon_ticks=12,
+        terminal_buffer_ticks=2,
+        total_orders=12,
+        candidate_vehicles=8,
+        vehicle_join_probability=1.0,
+        fleet_probability=0.0,
+        train_episodes=1,
+        eval_episodes=1,
+    )
+    env = FutureV2VTimingEnv(env_config, scale, seed=11)
+    env.reset(seed=11)
+    assert len(env.orders) == scale.total_orders
+    assert [order.order_id for order in env.orders] == list(range(scale.total_orders))

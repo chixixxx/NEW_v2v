@@ -10,6 +10,8 @@ from future_v2v.simulation.generator import Scenario
 
 
 class TLCManhattanScenarioGenerator:
+    WINDOW_SEARCH_ATTEMPTS = 96
+
     def __init__(self, env_config: EnvironmentConfig, scale_config: ScaleConfig, data: TLCManhattanData) -> None:
         self.env_config = env_config
         self.scale_config = scale_config
@@ -34,13 +36,14 @@ class TLCManhattanScenarioGenerator:
         horizon = self.scale_config.horizon_ticks
         latest_start = max(0, self.data.ticks_per_day - horizon)
         best: tuple[str, int, pd.DataFrame] | None = None
-        for _ in range(16):
+        min_raw_rows = self._minimum_raw_rows_for_fixed_demand()
+        for _ in range(self.WINDOW_SEARCH_ATTEMPTS):
             day = str(rng.choice(available_days))
             start_tick_day = int(rng.integers(0, latest_start + 1))
             rows = self.data.rows_for_window(day, start_tick_day, horizon)
             if best is None or len(rows) > len(best[2]):
                 best = (day, start_tick_day, rows)
-            if len(rows) >= max(20, int(self.scale_config.total_orders * 0.65)):
+            if len(rows) >= min_raw_rows:
                 return day, start_tick_day, rows
         if best is None or best[2].empty:
             fallback_pool = self.data.trip_rows[self.data.trip_rows["pickup_date"].isin(available_days)]
@@ -55,6 +58,12 @@ class TLCManhattanScenarioGenerator:
             return day, start_tick_day, rows
         return best
 
+    def _minimum_raw_rows_for_fixed_demand(self) -> int:
+        if self.scale_config.total_orders <= 0:
+            return 0
+        sample_rate = max(0.01, self.env_config.demand_sample_rate)
+        return max(20, int(np.ceil(self.scale_config.total_orders / sample_rate)))
+
     def _eligible_days(self) -> list[str]:
         configured = self.env_config.train_days or self.env_config.eval_days or []
         configured = [str(day) for day in configured]
@@ -68,13 +77,15 @@ class TLCManhattanScenarioGenerator:
     def _sample_order_rows(self, rows: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
         if rows.empty:
             return rows
-        raw_target = int(len(rows) * max(0.01, self.env_config.demand_sample_rate))
-        target = max(1, min(self.scale_config.total_orders, raw_target))
-        if len(rows) <= target:
-            sampled = rows.copy()
+        target = max(0, int(self.scale_config.total_orders))
+        if target == 0:
+            return rows.iloc[0:0].copy()
+        weights = np.clip(rows["zone_pressure"].to_numpy(dtype=float), 0.4, 2.5)
+        weights = weights / weights.sum()
+        if len(rows) < target:
+            indices = rng.choice(rows.index.to_numpy(), size=target, replace=True, p=weights)
+            sampled = rows.loc[indices].copy()
         else:
-            weights = np.clip(rows["zone_pressure"].to_numpy(dtype=float), 0.4, 2.5)
-            weights = weights / weights.sum()
             indices = rng.choice(rows.index.to_numpy(), size=target, replace=False, p=weights)
             sampled = rows.loc[indices].copy()
         return sampled.sort_values(["pickup_tick_day", "pu_zone"]).reset_index(drop=True)
