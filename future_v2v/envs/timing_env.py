@@ -181,16 +181,18 @@ class FutureV2VTimingEnv:
             result.rejected_count = len(realized) - len(accepted)
             result.dispatch_capacity = int(capacity)
             result.candidate_edge_count = len(plan.edges)
-            result.rapid_dispatch_penalty = self._rapid_dispatch_penalty(tick)
-            result.dispatch_fixed_cost = (
-                self.env_config.dispatch_cost_for_mode(dispatch_mode)
-                + result.rapid_dispatch_penalty
+            result.gross_dispatch_profit = float(sum(match.realized_profit for match in accepted))
+            self.compute_dispatch_friction(
+                result,
+                dispatch_mode=dispatch_mode,
+                matched_count=result.matched_count,
+                tick=tick,
             )
             result.battery_health_rejection_count = sum(
                 int(plan.rejected_reason_counts.get(reason, 0))
                 for reason in ("energy_shortage", "battery_health_floor", "discharge_power_cap")
             )
-            result.platform_profit = float(sum(match.realized_profit for match in accepted) - result.dispatch_fixed_cost)
+            result.platform_profit = float(result.gross_dispatch_profit - result.dispatch_friction_cost)
             if accepted:
                 result.mean_pickup_minutes = float(np.mean([match.pickup_minutes for match in accepted]))
                 result.mean_commitment_ticks = float(np.mean([match.total_commitment_ticks for match in accepted]))
@@ -279,6 +281,18 @@ class FutureV2VTimingEnv:
             if order.matched_vehicle_id is not None
             and order.donor_soc_after_kwh + 1e-9 < floor_by_vehicle.get(order.matched_vehicle_id, 0.0)
         )
+        dispatch_friction_cost = sum(float(row.get("dispatch_friction_cost", 0.0)) for row in self.dispatch_trace)
+        dispatch_setup_cost = sum(float(row.get("dispatch_setup_cost", 0.0)) for row in self.dispatch_trace)
+        dispatch_pair_coordination_cost = sum(
+            float(row.get("dispatch_pair_coordination_cost", 0.0))
+            for row in self.dispatch_trace
+        )
+        dispatch_refresh_cost = sum(float(row.get("dispatch_refresh_cost", 0.0)) for row in self.dispatch_trace)
+        dispatch_full_mode_extra_cost = sum(
+            float(row.get("dispatch_full_mode_extra_cost", 0.0))
+            for row in self.dispatch_trace
+        )
+        gross_dispatch_profit = self.platform_profit + dispatch_friction_cost
         battery_health_rejection_count = sum(
             int(row.get("battery_health_rejection_count", 0))
             for row in self.dispatch_trace
@@ -337,6 +351,12 @@ class FutureV2VTimingEnv:
             seller_degradation_cost=seller_degradation_cost,
             seller_service_premium=seller_service_premium,
             platform_margin=buyer_payment - seller_reimbursement - platform_pickup_cost - seller_time_cost,
+            dispatch_friction_cost=dispatch_friction_cost,
+            dispatch_setup_cost=dispatch_setup_cost,
+            dispatch_pair_coordination_cost=dispatch_pair_coordination_cost,
+            dispatch_refresh_cost=dispatch_refresh_cost,
+            dispatch_full_mode_extra_cost=dispatch_full_mode_extra_cost,
+            friction_share_of_gross_profit=dispatch_friction_cost / max(1e-9, gross_dispatch_profit),
             mean_donor_soc_after=float(np.mean(donor_soc_after_values)) if donor_soc_after_values else 0.0,
             min_donor_soc_after=float(np.min(donor_soc_after_values)) if donor_soc_after_values else 0.0,
             donor_soc_violation_count=donor_soc_violation_count,
@@ -525,12 +545,38 @@ class FutureV2VTimingEnv:
         raw = mid_ramp * order.cancel_sensitivity * 0.42 + late_ramp * order.cancel_sensitivity * 1.85
         return float(np.clip(raw, 0.0, 0.16))
 
-    def _rapid_dispatch_penalty(self, tick: int) -> float:
-        window = int(self.env_config.rapid_dispatch_penalty_window_ticks)
-        penalty = float(self.env_config.rapid_dispatch_penalty)
-        if window <= 0 or penalty <= 0.0 or not self.dispatch_ticks:
-            return 0.0
-        return penalty if tick - self.dispatch_ticks[-1] <= window else 0.0
+    def compute_dispatch_friction(
+        self,
+        result: StepResult,
+        *,
+        dispatch_mode: str,
+        matched_count: int,
+        tick: int,
+    ) -> None:
+        friction = self.env_config.dispatch_friction
+        if not friction.enabled:
+            return
+        ticks_since_last = tick - self.dispatch_ticks[-1] if self.dispatch_ticks else float("inf")
+        refresh_cost = 0.0
+        if self.dispatch_ticks and friction.refresh_cost > 0.0:
+            refresh_cost = friction.refresh_cost * float(
+                np.exp(-max(0.0, float(ticks_since_last)) / max(1e-6, friction.refresh_decay_ticks))
+            )
+        pair_cost = friction.pair_coordination_cost * max(0, int(matched_count))
+        full_extra = 0.0
+        if dispatch_mode == "full":
+            full_extra = friction.full_mode_extra_pair_cost * max(0, int(matched_count))
+        result.ticks_since_last_dispatch = float(ticks_since_last if self.dispatch_ticks else -1.0)
+        result.dispatch_setup_cost = float(friction.setup_cost)
+        result.dispatch_pair_coordination_cost = float(pair_cost)
+        result.dispatch_refresh_cost = float(refresh_cost)
+        result.dispatch_full_mode_extra_cost = float(full_extra)
+        result.dispatch_friction_cost = float(friction.setup_cost + pair_cost + refresh_cost + full_extra)
+        result.friction_share_of_gross_profit = (
+            result.dispatch_friction_cost / result.gross_dispatch_profit
+            if result.gross_dispatch_profit > 0.0
+            else 0.0
+        )
 
     def _step_reward(self, result: StepResult) -> float:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
@@ -575,8 +621,14 @@ class FutureV2VTimingEnv:
             "accepted_count": result.accepted_count,
             "expired_count": result.expired_count,
             "cancelled_count": result.cancelled_count,
-            "dispatch_fixed_cost": result.dispatch_fixed_cost,
-            "rapid_dispatch_penalty": result.rapid_dispatch_penalty,
+            "gross_dispatch_profit": result.gross_dispatch_profit,
+            "dispatch_friction_cost": result.dispatch_friction_cost,
+            "dispatch_setup_cost": result.dispatch_setup_cost,
+            "dispatch_pair_coordination_cost": result.dispatch_pair_coordination_cost,
+            "dispatch_refresh_cost": result.dispatch_refresh_cost,
+            "dispatch_full_mode_extra_cost": result.dispatch_full_mode_extra_cost,
+            "ticks_since_last_dispatch": result.ticks_since_last_dispatch,
+            "friction_share_of_gross_profit": result.friction_share_of_gross_profit,
             "buyer_payment": result.buyer_payment,
             "seller_reimbursement": result.seller_reimbursement,
             "energy_loss_kwh": result.energy_loss_kwh,
@@ -596,8 +648,14 @@ class FutureV2VTimingEnv:
                 "action": action,
                 "dispatch_mode": ACTION_NAMES[action],
                 "dispatch_capacity": result.dispatch_capacity,
-                "dispatch_fixed_cost": result.dispatch_fixed_cost,
-                "rapid_dispatch_penalty": result.rapid_dispatch_penalty,
+                "gross_dispatch_profit": result.gross_dispatch_profit,
+                "dispatch_friction_cost": result.dispatch_friction_cost,
+                "dispatch_setup_cost": result.dispatch_setup_cost,
+                "dispatch_pair_coordination_cost": result.dispatch_pair_coordination_cost,
+                "dispatch_refresh_cost": result.dispatch_refresh_cost,
+                "dispatch_full_mode_extra_cost": result.dispatch_full_mode_extra_cost,
+                "ticks_since_last_dispatch": result.ticks_since_last_dispatch,
+                "friction_share_of_gross_profit": result.friction_share_of_gross_profit,
                 "candidate_edges": plan_edges,
                 "matched_count": result.matched_count,
                 "accepted_count": result.accepted_count,

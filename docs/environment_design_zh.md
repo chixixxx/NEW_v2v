@@ -27,10 +27,41 @@
 - 基础入池率 0.36。
 - `supply_scale=0.55`。
 - 每单候选车辆上限 20。
-- `MATCH_TOP_BATCH` 固定成本 18.0。
-- `MATCH_FULL` 固定成本 38.5。
-- 连续派单惩罚：最近 1 tick 内已派单时，额外扣 10.0。
 - top-batch 容量为活跃订单的 55%，并限制在 8 到 80 之间。
+
+## Dispatch Friction
+
+正式口径不再使用硬阈值 `rapid_dispatch_penalty`，也不再给 `MATCH_TOP_BATCH` 和 `MATCH_FULL` 两套互不相干的固定成本。每次 dispatch 扣除可解释的 V2V 交易摩擦：
+
+```text
+dispatch_friction_cost =
+  setup_cost
+  + pair_coordination_cost
+  + refresh_cost
+  + full_mode_extra_cost
+```
+
+默认配置：
+
+```text
+setup_cost = 18.0
+pair_coordination_cost = 0.75 * matched_pairs
+full_mode_extra_cost = 0.20 * matched_pairs, only for MATCH_FULL
+refresh_cost = 16.0 * exp(-ticks_since_last_dispatch / 1.5)
+```
+
+含义：
+
+- `setup_cost` 表示报价、清算、通知和平台撮合的基础交易启动成本。
+- `pair_coordination_cost` 表示每对 CV-DV 交易的沟通、路线承诺和确认成本。
+- `full_mode_extra_cost` 表示 full match 触达更多低边际交易带来的额外协调成本，而不是算法计算更贵。
+- `refresh_cost` 表示短时间内反复刷新报价和承诺的摩擦，采用平滑衰减，不使用 1 tick 硬惩罚。
+
+`platform_profit` 的 episode 口径为：
+
+```text
+accepted_realized_profit - dispatch_friction_cost
+```
 
 ## TLC 到 V2V 的改造
 
@@ -80,17 +111,16 @@ seller_reimbursement =
 platform_margin = buyer_payment - seller_reimbursement - pickup_cost - seller_time_cost
 ```
 
-`platform_profit` 在 episode 层继续扣除每次 dispatch 的固定成本与连续派单惩罚。
-
 ## 环境健康目标
 
-环境健康不只看服务率，还要看动态匹配是否有研究区分度：
+正式验收看 `decomposed_transaction_cost` 口径：
 
-- `service_rate` 约 65%-82%。
-- `expired + cancelled` 约 8%-28%，stress benchmark 中允许略高，但不能让所有策略同时崩盘。
-- 优良策略 `mean_batch_interval` 约 1.3-2.2 ticks。
-- `fixed_1_tick_top_batch` 与 `fixed_1_tick_full_match` 的 score gap ratio 目标约 5%-20%。
-- `fixed_1_tick_top_batch` capacity bind rate 目标约 30%-60%。
+- `best_mean_batch_interval` 在 1.3-2.2 ticks。
+- best policy 相对 `fixed_1_tick_full_match` 的 paired score delta 大于 500。
+- `fixed_2_tick_full_match` 相对 fixed1 的 service drop 在 4%-10%。
+- `fixed_1_tick_top_batch` capacity bind rate 在 25%-60%。
+- `no_refresh_friction` sensitivity 下 paired score delta 仍大于 200，否则标记 `friction_sensitive_risk=True`。
+- `no_dispatch_friction` 只作为诊断，不要求动态策略胜出。
 - `donor_soc_violation_count = 0`。
 - `energy_loss_rate` 约 8%-12%。
 - `platform_margin_per_served_order > 0`。
@@ -102,7 +132,8 @@ platform_margin = buyer_payment - seller_reimbursement - pickup_cost - seller_ti
 - `eval_summary.csv`：主指标和 episode 聚合。
 - `timing_policy_comparison.csv`：动态匹配区分度。
 - `paired_policy_delta_summary.csv`：相对 `fixed_1_tick_full_match` 的同场景差值和 win rate。
-- `environment_acceptance_summary.csv`：环境是否满足 dynamic timing stress benchmark 验收条件。
+- `friction_sensitivity_summary.csv`：不同 friction 口径下的 robust 性。
+- `environment_acceptance_summary.csv`：环境是否满足 dynamic timing stress benchmark 和 friction robust 验收条件。
 - `action_trace_by_policy.csv`：每 tick 动作与状态。
-- `dispatch_trace_by_policy.csv`：每次 dispatch 的收益、电量、SOC 和补偿拆分。
+- `dispatch_trace_by_policy.csv`：每次 dispatch 的收益、电量、SOC、补偿和 friction 拆分。
 - `wait_tradeoff_trace.csv`：WAIT 后新增候选边、收益和取消/过期损失。

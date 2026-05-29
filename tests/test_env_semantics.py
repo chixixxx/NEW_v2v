@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from future_v2v.config import EnvironmentConfig, ScaleConfig
+from future_v2v.config import DispatchFrictionConfig, EnvironmentConfig, ScaleConfig
 from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, WAIT, FutureV2VTimingEnv
 from future_v2v.simulation.entities import ORDER_EXPIRED, ORDER_MATCHED, Order, Vehicle
 
@@ -12,7 +12,6 @@ def make_env() -> FutureV2VTimingEnv:
         service_kwh_per_tick=5.0,
         pickup_cap_minutes=30.0,
         platform_pickup_cost_per_min=0.0,
-        dispatch_fixed_cost=0.0,
         dispatch_capacity_ratio=0.55,
         dispatch_capacity_min=1,
         dispatch_capacity_max=80,
@@ -30,6 +29,7 @@ def make_env() -> FutureV2VTimingEnv:
         profit_scale_fallback=5.0,
         enable_stochastic_acceptance=False,
         enable_stochastic_cancellation=False,
+        dispatch_friction=DispatchFrictionConfig(enabled=False),
     )
     scale = ScaleConfig(
         name="unit",
@@ -101,49 +101,95 @@ def test_match_updates_order_vehicle_and_profit() -> None:
     assert reward > 0.0
 
 
-def test_dispatch_fixed_cost_is_subtracted_from_match_profit() -> None:
+def test_dispatch_friction_is_subtracted_from_match_profit() -> None:
     env = make_env()
-    env.env_config = env.env_config.__class__(**{**env.env_config.__dict__, "dispatch_fixed_cost": 7.0})
+    env.env_config = env.env_config.__class__(
+        **{
+            **env.env_config.__dict__,
+            "dispatch_friction": DispatchFrictionConfig(
+                enabled=True,
+                setup_cost=7.0,
+                pair_coordination_cost=0.0,
+                full_mode_extra_pair_cost=0.0,
+                refresh_cost=0.0,
+            ),
+        }
+    )
     env.matcher.env_config = env.env_config
     install_single_order_vehicle(env, max_wait_ticks=2)
     _obs, _reward, _terminated, _truncated, info = env.step(MATCH_FULL)
     assert info["step_result"].platform_profit == env.orders[0].realized_profit - 7.0
 
 
-def test_dispatch_mode_specific_costs_are_applied() -> None:
+def test_dispatch_friction_breakdown_is_applied() -> None:
     env = make_env()
     env.env_config = env.env_config.__class__(
         **{
             **env.env_config.__dict__,
-            "dispatch_fixed_cost": 7.0,
-            "dispatch_fixed_cost_top_batch": 3.0,
-            "dispatch_fixed_cost_full": 11.0,
+            "dispatch_friction": DispatchFrictionConfig(
+                enabled=True,
+                setup_cost=3.0,
+                pair_coordination_cost=2.0,
+                full_mode_extra_pair_cost=5.0,
+                refresh_cost=0.0,
+            ),
         }
     )
     env.matcher.env_config = env.env_config
     install_single_order_vehicle(env, max_wait_ticks=2)
     _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
-    assert info["step_result"].dispatch_fixed_cost == 3.0
-    assert info["step_result"].platform_profit == env.orders[0].realized_profit - 3.0
+    assert info["step_result"].dispatch_friction_cost == 5.0
+    assert info["step_result"].dispatch_setup_cost == 3.0
+    assert info["step_result"].dispatch_pair_coordination_cost == 2.0
+    assert info["step_result"].dispatch_full_mode_extra_cost == 0.0
+    assert info["step_result"].platform_profit == env.orders[0].realized_profit - 5.0
 
 
-def test_rapid_dispatch_penalty_applies_to_consecutive_dispatches() -> None:
+def test_full_mode_only_adds_extra_pair_friction() -> None:
     env = make_env()
     env.env_config = env.env_config.__class__(
         **{
             **env.env_config.__dict__,
-            "dispatch_fixed_cost_top_batch": 3.0,
-            "rapid_dispatch_penalty_window_ticks": 1,
-            "rapid_dispatch_penalty": 5.0,
+            "dispatch_friction": DispatchFrictionConfig(
+                enabled=True,
+                setup_cost=3.0,
+                pair_coordination_cost=2.0,
+                full_mode_extra_pair_cost=5.0,
+                refresh_cost=0.0,
+            ),
+        }
+    )
+    env.matcher.env_config = env.env_config
+    install_single_order_vehicle(env, max_wait_ticks=2)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_FULL)
+    assert info["step_result"].dispatch_friction_cost == 10.0
+    assert info["step_result"].dispatch_full_mode_extra_cost == 5.0
+
+
+def test_refresh_friction_decays_smoothly_after_recent_dispatch() -> None:
+    env = make_env()
+    env.env_config = env.env_config.__class__(
+        **{
+            **env.env_config.__dict__,
+            "dispatch_friction": DispatchFrictionConfig(
+                enabled=True,
+                setup_cost=0.0,
+                pair_coordination_cost=0.0,
+                full_mode_extra_pair_cost=0.0,
+                refresh_cost=9.0,
+                refresh_decay_ticks=1.0,
+            ),
         }
     )
     env.matcher.env_config = env.env_config
     install_single_order_vehicle(env, max_wait_ticks=2)
     _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
-    assert info["step_result"].dispatch_fixed_cost == 3.0
+    assert info["step_result"].dispatch_refresh_cost == 0.0
     _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
-    assert info["step_result"].rapid_dispatch_penalty == 5.0
-    assert info["step_result"].dispatch_fixed_cost == 8.0
+    one_tick_cost = info["step_result"].dispatch_refresh_cost
+    env.step(WAIT)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
+    assert 0.0 < info["step_result"].dispatch_refresh_cost < one_tick_cost
 
 
 def test_action_traces_record_wait_and_dispatch() -> None:

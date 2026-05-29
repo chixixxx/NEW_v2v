@@ -64,7 +64,7 @@ python scripts/run_experiment.py --stage report --scale main
 
 - `generate`：生成固定评估 manifest 和环境健康报告，检查供需比、活跃订单/车辆、可行边密度、健康可供电量和 SOC 安全线绑定率。
 - `train`：训练 DQN timing policy。RL 学习 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`，匹配边由约束优化器决定。
-- `eval`：评估 DQN 与 fixed interval、queue threshold、deadline trigger、supply-demand pressure、short lookahead 等策略。
+- `eval`：评估 DQN 与 fixed interval、queue threshold、deadline trigger、supply-demand pressure、short lookahead 等策略，并额外运行 friction sensitivity。
 - `report`：汇总环境、训练和评估报告。
 - `all`：顺序执行 `generate -> train -> eval -> report`。
 
@@ -73,10 +73,27 @@ python scripts/run_experiment.py --stage report --scale main
 - `smoke`: 60 ticks + 8 buffer，80 单，120 候选车辆。
 - `main`: 80 ticks + 14 buffer，1600 单，1900 候选车辆，基础入池率 0.36，供给缩放 0.55。
 - 每单候选车辆上限：20。
-- `MATCH_TOP_BATCH` 固定成本：18.0。
-- `MATCH_FULL` 固定成本：38.5。
-- 连续派单惩罚：最近 1 tick 内已经派单时，额外扣 10.0。
 - top-batch 容量：活跃订单的 55%，并限制在 8 到 80 之间。
+
+## Dispatch Friction 参数
+
+集中配置在 `configs/default.json` 的 `environment.dispatch_friction`：
+
+```text
+enabled = true
+setup_cost = 18.0
+pair_coordination_cost = 0.75
+full_mode_extra_pair_cost = 0.20
+refresh_cost = 16.0
+refresh_decay_ticks = 1.5
+```
+
+评估会额外输出 `friction_sensitivity_summary.csv`，包括：
+
+- `decomposed_transaction_cost`：默认正式口径。
+- `no_refresh_friction`：去掉平滑刷新摩擦。
+- `common_fixed_cost`：去掉 full mode 额外 pair cost。
+- `no_dispatch_friction`：完全去掉 dispatch friction，仅作反事实诊断。
 
 ## 电池健康与价格参数
 
@@ -108,6 +125,7 @@ max_discharge_power_kw = 50.0
 - `outputs/<run_name>/eval/eval_summary.csv`
 - `outputs/<run_name>/eval/timing_policy_comparison.csv`
 - `outputs/<run_name>/eval/paired_policy_delta_summary.csv`
+- `outputs/<run_name>/eval/friction_sensitivity_summary.csv`
 - `outputs/<run_name>/eval/environment_acceptance_summary.csv`
 - `outputs/<run_name>/eval/dispatch_trace_by_policy.csv`
 - `outputs/<run_name>/eval/wait_tradeoff_trace.csv`
@@ -115,16 +133,16 @@ max_discharge_power_kw = 50.0
 关键指标：
 
 - `future_v2v_score_mean`：主排序指标。
-- `platform_profit_mean`：扣除 dispatch 固定成本和连续派单惩罚后的平台利润。
-- `platform_margin_per_served_order`：不含 dispatch 成本的单服务边际收益。
+- `platform_profit_mean`：扣除 dispatch friction 后的平台利润。
+- `dispatch_friction_cost_mean`：交易摩擦总成本。
+- `friction_share_of_gross_profit_mean`：交易摩擦占 dispatch gross profit 的比例。
+- `platform_margin_per_served_order`：不含 dispatch friction 的单服务边际收益。
 - `energy_loss_rate`：V2V 传输损耗率，默认应约 10%。
-- `seller_compensation_share`：卖方补偿占买方支付比例。
 - `donor_soc_violation_count_mean`：必须为 0。
-- `battery_health_rejection_count_mean`：电池健康约束造成的候选拒绝规模。
 - `mean_batch_interval_mean`：越接近 1，越像一步一匹配。
 - `capacity_bind_rate`：top-batch 容量是否真的起到截断作用。
-- `paired_policy_delta_summary.csv`：优先看同场景 score delta 和 win rate，而不是只看 raw std。
-- `dynamic_timing_ready`：策略差异、batch interval、fixed_2 服务率下降和 top-batch 可用性是否同时满足 stress benchmark 条件。
+- `friction_robust_ready`：动态时机优势是否在 `no_refresh_friction` 下仍然保留。
+- `friction_sensitive_risk`：若为 True，说明环境差异仍过度依赖 dispatch friction。
 
 ## 验证
 

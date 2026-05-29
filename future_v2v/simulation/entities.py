@@ -173,6 +173,7 @@ class Match:
 @dataclass
 class StepResult:
     platform_profit: float = 0.0
+    gross_dispatch_profit: float = 0.0
     matched_count: int = 0
     accepted_count: int = 0
     rejected_count: int = 0
@@ -181,8 +182,13 @@ class StepResult:
     dispatch_executed: bool = False
     dispatch_mode: str = "wait"
     dispatch_capacity: int = 0
-    dispatch_fixed_cost: float = 0.0
-    rapid_dispatch_penalty: float = 0.0
+    dispatch_friction_cost: float = 0.0
+    dispatch_setup_cost: float = 0.0
+    dispatch_pair_coordination_cost: float = 0.0
+    dispatch_refresh_cost: float = 0.0
+    dispatch_full_mode_extra_cost: float = 0.0
+    ticks_since_last_dispatch: float = 0.0
+    friction_share_of_gross_profit: float = 0.0
     candidate_edge_count: int = 0
     mean_pickup_minutes: float = 0.0
     mean_commitment_ticks: float = 0.0

@@ -11,7 +11,7 @@
 ```text
 强化学习决定 WAIT / MATCH_TOP_BATCH / MATCH_FULL
 约束优化器决定订单-车辆匹配边
-电池健康和双边价格机制决定边是否可行、是否有正平台收益
+电池健康、双边价格和交易摩擦共同决定平台收益
 ```
 
 ## MDP 定义
@@ -47,15 +47,13 @@ available_energy =
 
 默认 `donor_min_soc_ratio=0.25`，防止供给车辆被放电到过低 SOC。
 
-平台利润拆成可解释的双边经济结构：
+边级平台毛收益拆成可解释的双边经济结构：
 
 ```text
 buyer_payment
 - seller_reimbursement
 - platform_pickup_cost
 - seller_time_cost
-- dispatch_fixed_cost
-- rapid_dispatch_penalty
 ```
 
 卖方补偿拆为：
@@ -66,15 +64,28 @@ energy_cost + degradation_cost + service_premium
 
 其中 `degradation_cost_per_kwh=0.08` 单独统计，不混入基础电价。
 
-## 动态匹配压力设计
+## Dispatch Friction
 
-主环境要体现“等待形成更好 batch”和“等待导致取消、过期、车辆离池”的权衡。
+V2V dispatch 不只是算法重算，还包含报价、通知、路线承诺、SOC 承诺、支付和用户确认。因此正式环境采用 decomposed transaction cost：
 
-- `MATCH_TOP_BATCH` 固定成本为 18.0。
-- `MATCH_FULL` 固定成本为 38.5。
-- 若最近 1 tick 内已经派单，再次派单额外扣 10.0，避免一步一匹配成为无成本默认选择。
-- top-batch 容量为活跃订单的 55%，并限制在 8 到 80 之间。
-- `short_lookahead_top_batch` 作为强规则基线时带连续触发冷却，只有临期占比足够高才允许连续派单。
+```text
+dispatch_friction_cost =
+  setup_cost
+  + pair_coordination_cost
+  + refresh_cost
+  + full_mode_extra_cost
+```
+
+默认值：
+
+```text
+setup_cost = 18.0
+pair_coordination_cost = 0.75 * matched_pairs
+full_mode_extra_cost = 0.20 * matched_pairs, only for MATCH_FULL
+refresh_cost = 16.0 * exp(-ticks_since_last_dispatch / 1.5)
+```
+
+`MATCH_FULL` 更贵不是因为计算更贵，而是因为它触发更多低边际 CV-DV 交易协调。`refresh_cost` 是平滑衰减的报价刷新摩擦，不是硬性的连续派单惩罚。
 
 ## 算法路线
 
@@ -89,7 +100,7 @@ energy_cost + degradation_cost + service_premium
 
 teacher replay prefill 只输出同一动作空间下的 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`，不直接输出匹配边，避免模仿学习接口和 RL 控制接口不一致。
 
-## 对比基线
+## 对比基线与可信性检查
 
 所有基线使用同一仿真器、同一候选图、同一电池健康约束和同一约束优化器：
 
@@ -102,4 +113,11 @@ teacher replay prefill 只输出同一动作空间下的 `WAIT / MATCH_TOP_BATCH
 - `short_lookahead_top_batch`
 - `dqn_adaptive_timing`
 
-主比较对象不是某个规则的边级得分，而是不同匹配时机策略在约束利润、服务率、取消/过期、平均 batch interval、平台边际收益和电池健康指标上的综合表现。
+评估额外运行 friction sensitivity：
+
+- `decomposed_transaction_cost`：正式口径。
+- `no_refresh_friction`：检查动态优势是否依赖短时间重复 dispatch 成本。
+- `common_fixed_cost`：检查 full/top 差异是否过度依赖 full extra cost。
+- `no_dispatch_friction`：诊断完全无交易摩擦时是否自然退化为高频匹配。
+
+主结论必须来自 `decomposed_transaction_cost`，并且 `no_refresh_friction` 下仍保留正向 paired delta，才认为环境具备可信动态匹配区分度。

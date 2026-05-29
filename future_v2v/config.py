@@ -22,13 +22,22 @@ class BatteryHealthConfig:
 
 
 @dataclass(frozen=True)
+class DispatchFrictionConfig:
+    enabled: bool = True
+    setup_cost: float = 10.0
+    pair_coordination_cost: float = 0.55
+    full_mode_extra_pair_cost: float = 0.20
+    refresh_cost: float = 4.0
+    refresh_decay_ticks: float = 1.5
+
+
+@dataclass(frozen=True)
 class EnvironmentConfig:
     zone_count: int
     action_space: str
     service_kwh_per_tick: float
     pickup_cap_minutes: float
     platform_pickup_cost_per_min: float
-    dispatch_fixed_cost: float
     dispatch_capacity_ratio: float
     dispatch_capacity_min: int
     dispatch_capacity_max: int
@@ -62,17 +71,7 @@ class EnvironmentConfig:
     train_days: list[str] | None = None
     eval_days: list[str] | None = None
     battery_health: BatteryHealthConfig = field(default_factory=BatteryHealthConfig)
-    dispatch_fixed_cost_top_batch: float | None = None
-    dispatch_fixed_cost_full: float | None = None
-    rapid_dispatch_penalty_window_ticks: int = 0
-    rapid_dispatch_penalty: float = 0.0
-
-    def dispatch_cost_for_mode(self, dispatch_mode: str) -> float:
-        if dispatch_mode == "top_batch" and self.dispatch_fixed_cost_top_batch is not None:
-            return self.dispatch_fixed_cost_top_batch
-        if dispatch_mode == "full" and self.dispatch_fixed_cost_full is not None:
-            return self.dispatch_fixed_cost_full
-        return self.dispatch_fixed_cost
+    dispatch_friction: DispatchFrictionConfig = field(default_factory=DispatchFrictionConfig)
 
 
 @dataclass(frozen=True)
@@ -133,6 +132,7 @@ def load_project_config(path: str | Path = "configs/default.json") -> ProjectCon
     env_raw = dict(raw["environment"])
     env_raw.setdefault("tick_minutes", raw["experiment"]["minutes_per_tick"])
     env_raw["battery_health"] = BatteryHealthConfig(**dict(env_raw.get("battery_health", {})))
+    env_raw["dispatch_friction"] = DispatchFrictionConfig(**dict(env_raw.get("dispatch_friction", {})))
     if int(env_raw["tick_minutes"]) != int(raw["experiment"]["minutes_per_tick"]):
         raise ValueError("environment.tick_minutes must match experiment.minutes_per_tick")
     scales = {

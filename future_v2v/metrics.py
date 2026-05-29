@@ -41,6 +41,12 @@ class EpisodeMetrics:
     seller_degradation_cost: float = 0.0
     seller_service_premium: float = 0.0
     platform_margin: float = 0.0
+    dispatch_friction_cost: float = 0.0
+    dispatch_setup_cost: float = 0.0
+    dispatch_pair_coordination_cost: float = 0.0
+    dispatch_refresh_cost: float = 0.0
+    dispatch_full_mode_extra_cost: float = 0.0
+    friction_share_of_gross_profit: float = 0.0
     mean_donor_soc_after: float = 0.0
     min_donor_soc_after: float = 0.0
     donor_soc_violation_count: int = 0
@@ -131,6 +137,12 @@ def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | s
         "seller_degradation_cost",
         "seller_service_premium",
         "platform_margin",
+        "dispatch_friction_cost",
+        "dispatch_setup_cost",
+        "dispatch_pair_coordination_cost",
+        "dispatch_refresh_cost",
+        "dispatch_full_mode_extra_cost",
+        "friction_share_of_gross_profit",
         "mean_donor_soc_after",
         "min_donor_soc_after",
         "donor_soc_violation_count",

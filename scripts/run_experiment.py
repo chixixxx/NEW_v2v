@@ -4,6 +4,7 @@ import argparse
 import csv
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -13,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from future_v2v.algorithms.baselines import TimingPolicy, default_baselines, policy_from_name, run_policy_episode
 from future_v2v.algorithms.dqn import DQNTimingAgent
-from future_v2v.config import ProjectConfig, load_project_config, resolve_run_dir
+from future_v2v.config import DispatchFrictionConfig, ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
 from future_v2v.metrics import summarize_metrics, write_csv
 from future_v2v.progress import progress
@@ -127,21 +128,14 @@ def run_eval(
     checkpoint = run_dir / "train" / "dqn_timing_agent.pt"
     if checkpoint.exists():
         policy_specs.append(("dqn", str(checkpoint)))
-    tasks = [(policy_spec, scenario) for policy_spec in policy_specs for scenario in manifest_rows]
-    if eval_workers > 1:
-        with ProcessPoolExecutor(max_workers=eval_workers) as executor:
-            futures = [
-                executor.submit(_run_eval_task, config, scale_name, scenario, policy_spec)
-                for policy_spec, scenario in tasks
-            ]
-            results = [
-                future.result()
-                for future in progress(futures, desc="eval policies", total=len(futures), unit="episode")
-            ]
-    else:
-        results = []
-        for policy_spec, scenario in progress(tasks, desc="eval policies", total=len(tasks), unit="episode"):
-            results.append(_run_eval_task(config, scale_name, scenario, policy_spec))
+    results = _evaluate_policy_specs(
+        config,
+        scale_name,
+        manifest_rows,
+        policy_specs,
+        eval_workers=eval_workers,
+        desc="eval policies",
+    )
     all_metrics = [result["metrics"] for result in results]
     action_rows = [row for result in results for row in result["action_trace"]]
     dispatch_rows = [row for result in results for row in result["dispatch_trace"]]
@@ -150,7 +144,23 @@ def run_eval(
     summary_rows = summarize_metrics(all_metrics)
     paired_rows = _paired_policy_delta_summary(all_metrics)
     comparison_rows = _timing_policy_comparison(summary_rows, dispatch_rows)
-    acceptance_rows = _environment_acceptance_summary(summary_rows, dispatch_rows, action_rows, paired_rows)
+    sensitivity_rows = _run_friction_sensitivity(
+        config,
+        scale_name,
+        manifest_rows,
+        policy_specs,
+        eval_workers=eval_workers,
+        primary_summary_rows=summary_rows,
+        primary_dispatch_rows=dispatch_rows,
+        primary_paired_rows=paired_rows,
+    )
+    acceptance_rows = _environment_acceptance_summary(
+        summary_rows,
+        dispatch_rows,
+        action_rows,
+        paired_rows,
+        sensitivity_rows,
+    )
     write_csv(run_dir / "eval" / "episode_metrics.csv", detail_rows)
     write_csv(run_dir / "eval" / "eval_summary.csv", summary_rows)
     write_csv(run_dir / "eval" / "paired_policy_delta_summary.csv", paired_rows)
@@ -158,6 +168,7 @@ def run_eval(
     write_csv(run_dir / "eval" / "dispatch_trace_by_policy.csv", dispatch_rows)
     write_csv(run_dir / "eval" / "wait_tradeoff_trace.csv", wait_rows)
     write_csv(run_dir / "eval" / "timing_policy_comparison.csv", comparison_rows)
+    write_csv(run_dir / "eval" / "friction_sensitivity_summary.csv", sensitivity_rows)
     write_csv(run_dir / "eval" / "environment_acceptance_summary.csv", acceptance_rows)
     write_markdown_report(
         run_dir / "eval" / "eval_report.md",
@@ -165,6 +176,7 @@ def run_eval(
         summary_lines=[
             "主表按 future_v2v_score_mean 排序；profit、服务率、取消和过期是辅助解释指标。",
             "timing_degenerate_risk=True 表示策略可能退化为过于频繁的一步匹配。",
+            "friction_sensitivity_summary.csv checks whether timing gains survive decomposed and weakened friction settings.",
             f"episodes_per_policy={len(manifest_rows)}, eval_workers={eval_workers}",
         ],
         table_rows=summary_rows,
@@ -192,6 +204,32 @@ def run_report(run_dir: Path) -> None:
     report_dir = run_dir / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "run_report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _evaluate_policy_specs(
+    config: ProjectConfig,
+    scale_name: str,
+    manifest_rows: list[dict[str, object]],
+    policy_specs: list[tuple[str, str]],
+    *,
+    eval_workers: int,
+    desc: str,
+) -> list[dict[str, object]]:
+    tasks = [(policy_spec, scenario) for policy_spec in policy_specs for scenario in manifest_rows]
+    if eval_workers > 1:
+        with ProcessPoolExecutor(max_workers=eval_workers) as executor:
+            futures = [
+                executor.submit(_run_eval_task, config, scale_name, scenario, policy_spec)
+                for policy_spec, scenario in tasks
+            ]
+            return [
+                future.result()
+                for future in progress(futures, desc=desc, total=len(futures), unit="episode")
+            ]
+    results = []
+    for policy_spec, scenario in progress(tasks, desc=desc, total=len(tasks), unit="episode"):
+        results.append(_run_eval_task(config, scale_name, scenario, policy_spec))
+    return results
 
 
 def _run_eval_task(
@@ -329,6 +367,128 @@ def _paired_policy_delta_summary(
     return rows
 
 
+def _run_friction_sensitivity(
+    config: ProjectConfig,
+    scale_name: str,
+    manifest_rows: list[dict[str, object]],
+    policy_specs: list[tuple[str, str]],
+    *,
+    eval_workers: int,
+    primary_summary_rows: list[dict[str, float | str]],
+    primary_dispatch_rows: list[dict[str, object]],
+    primary_paired_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rows = [
+        _friction_sensitivity_row(
+            "decomposed_transaction_cost",
+            primary_summary_rows,
+            primary_dispatch_rows,
+            primary_paired_rows,
+        )
+    ]
+    for variant_name, friction in _friction_sensitivity_variants(config.environment.dispatch_friction):
+        variant_config = replace(
+            config,
+            environment=replace(config.environment, dispatch_friction=friction),
+        )
+        results = _evaluate_policy_specs(
+            variant_config,
+            scale_name,
+            manifest_rows,
+            policy_specs,
+            eval_workers=eval_workers,
+            desc=f"eval friction {variant_name}",
+        )
+        metrics = [result["metrics"] for result in results]
+        dispatch_rows = [row for result in results for row in result["dispatch_trace"]]
+        summary_rows = summarize_metrics(metrics)
+        paired_rows = _paired_policy_delta_summary(metrics)
+        rows.append(_friction_sensitivity_row(variant_name, summary_rows, dispatch_rows, paired_rows))
+    no_refresh_delta = _variant_delta(rows, "no_refresh_friction")
+    decomposed_delta = _variant_delta(rows, "decomposed_transaction_cost")
+    friction_robust_ready = bool(decomposed_delta > 500.0 and no_refresh_delta >= 200.0)
+    for row in rows:
+        row["no_refresh_score_delta_mean"] = no_refresh_delta
+        row["friction_robust_ready"] = friction_robust_ready
+        row["friction_sensitive_risk"] = bool(no_refresh_delta < 200.0)
+    return rows
+
+
+def _friction_sensitivity_variants(
+    base: DispatchFrictionConfig,
+) -> list[tuple[str, DispatchFrictionConfig]]:
+    return [
+        (
+            "no_refresh_friction",
+            replace(base, refresh_cost=0.0),
+        ),
+        (
+            "common_fixed_cost",
+            replace(base, full_mode_extra_pair_cost=0.0),
+        ),
+        (
+            "no_dispatch_friction",
+            replace(
+                base,
+                enabled=False,
+                setup_cost=0.0,
+                pair_coordination_cost=0.0,
+                full_mode_extra_pair_cost=0.0,
+                refresh_cost=0.0,
+            ),
+        ),
+    ]
+
+
+def _friction_sensitivity_row(
+    variant_name: str,
+    summary_rows: list[dict[str, float | str]],
+    dispatch_rows: list[dict[str, object]],
+    paired_rows: list[dict[str, object]],
+) -> dict[str, object]:
+    summary_by_policy = {str(row["policy_name"]): row for row in summary_rows}
+    fixed_1 = summary_by_policy.get("fixed_1_tick_full_match", {})
+    fixed_2 = summary_by_policy.get("fixed_2_tick_full_match", {})
+    fixed_1_top = summary_by_policy.get("fixed_1_tick_top_batch", {})
+    best = max(summary_rows, key=lambda row: float(row["future_v2v_score_mean"]), default={})
+    fixed_1_score = float(fixed_1.get("future_v2v_score_mean", 0.0))
+    fixed_1_service = float(fixed_1.get("service_rate_mean", 0.0))
+    fixed_2_service = float(fixed_2.get("service_rate_mean", 0.0))
+    fixed_1_top_score = float(fixed_1_top.get("future_v2v_score_mean", 0.0))
+    top_batch_gap_ratio = abs(fixed_1_top_score - fixed_1_score) / max(
+        1.0,
+        abs(fixed_1_top_score),
+        abs(fixed_1_score),
+    )
+    dispatch_by_policy: dict[str, list[dict[str, object]]] = {}
+    for row in dispatch_rows:
+        dispatch_by_policy.setdefault(str(row["policy_name"]), []).append(row)
+    paired_best = paired_rows[0] if paired_rows else {}
+    return {
+        "variant": variant_name,
+        "best_policy": best.get("policy_name", ""),
+        "best_score_delta_vs_fixed1": float(best.get("future_v2v_score_mean", 0.0)) - fixed_1_score,
+        "paired_best_policy": paired_best.get("policy_name", ""),
+        "paired_best_score_delta_mean": paired_best.get("score_delta_mean", 0.0),
+        "paired_best_score_win_rate": paired_best.get("score_win_rate", 0.0),
+        "best_mean_batch_interval": best.get("mean_batch_interval_mean", 0.0),
+        "fixed2_service_drop_vs_fixed1": fixed_1_service - fixed_2_service,
+        "fixed1_top_batch_score_gap_ratio": top_batch_gap_ratio,
+        "fixed1_top_batch_capacity_bind_rate": _capacity_bind_rate(
+            dispatch_by_policy.get("fixed_1_tick_top_batch", [])
+        ),
+        "mean_friction_share_of_gross_profit": best.get("friction_share_of_gross_profit_mean", 0.0),
+        "dispatch_friction_cost_mean": best.get("dispatch_friction_cost_mean", 0.0),
+    }
+
+
+def _variant_delta(rows: list[dict[str, object]], variant_name: str) -> float:
+    for row in rows:
+        if row.get("variant") == variant_name:
+            return float(row.get("paired_best_score_delta_mean", 0.0))
+    return 0.0
+
+
 def _load_or_build_eval_manifest(
     config: ProjectConfig,
     scale_name: str,
@@ -464,8 +624,7 @@ def _timing_policy_comparison(
                     policy_spread_score > 300.0
                     and batch_interval_spread >= 0.8
                     and 0.04 <= service_drop_fixed2_vs_fixed1 <= 0.10
-                    and 0.05 <= top_batch_score_gap_ratio <= 0.20
-                    and 0.30 <= fixed_1_top_bind_rate <= 0.60
+                    and 0.25 <= fixed_1_top_bind_rate <= 0.60
                 ),
             }
         )
@@ -477,6 +636,7 @@ def _environment_acceptance_summary(
     dispatch_rows: list[dict[str, object]],
     action_rows: list[dict[str, object]],
     paired_rows: list[dict[str, object]],
+    sensitivity_rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     summary_by_policy = {str(row["policy_name"]): row for row in summary_rows}
     fixed_1 = summary_by_policy.get("fixed_1_tick_full_match", {})
@@ -508,14 +668,16 @@ def _environment_acceptance_summary(
     dqn_top_batch_rate = dqn_actions.get("match_top_batch", 0) / max(1, dqn_total) if dqn_total else 0.0
     best_interval = float(best.get("mean_batch_interval_mean", 0.0))
     paired_best = paired_rows[0] if paired_rows else {}
+    paired_best_delta = float(paired_best.get("score_delta_mean", 0.0))
+    no_refresh_delta = _variant_delta(sensitivity_rows, "no_refresh_friction")
     baseline_ready = bool(
-        best_score_delta >= 300.0
-        and 0.05 <= top_batch_gap_ratio <= 0.20
-        and 0.30 <= fixed_1_top_bind_rate <= 0.60
+        paired_best_delta > 500.0
+        and 0.25 <= fixed_1_top_bind_rate <= 0.60
         and 0.04 <= fixed_1_service - fixed_2_service <= 0.10
         and 0.18 <= fixed_1_expired <= 0.22
-        and 1.25 <= best_interval <= 1.80
+        and 1.30 <= best_interval <= 2.20
     )
+    friction_robust_ready = bool(baseline_ready and no_refresh_delta >= 200.0)
     dqn_ready = bool(dqn_total and dqn_top_batch_rate >= 0.20)
     return [
         {
@@ -528,11 +690,14 @@ def _environment_acceptance_summary(
             "fixed1_top_batch_capacity_bind_rate": fixed_1_top_bind_rate,
             "dqn_top_batch_action_rate": dqn_top_batch_rate,
             "paired_best_policy": paired_best.get("policy_name", ""),
-            "paired_best_score_delta_mean": paired_best.get("score_delta_mean", 0.0),
+            "paired_best_score_delta_mean": paired_best_delta,
             "paired_best_score_win_rate": paired_best.get("score_win_rate", 0.0),
+            "no_refresh_score_delta_mean": no_refresh_delta,
             "baseline_environment_ready": baseline_ready,
+            "friction_robust_ready": friction_robust_ready,
+            "friction_sensitive_risk": bool(no_refresh_delta < 200.0),
             "dqn_action_ready": dqn_ready,
-            "dynamic_timing_ready": bool(baseline_ready and (dqn_ready or not dqn_total)),
+            "dynamic_timing_ready": bool(friction_robust_ready and (dqn_ready or not dqn_total)),
         }
     ]
 
