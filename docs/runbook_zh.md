@@ -51,7 +51,7 @@ python scripts/run_experiment.py --stage smoke --episodes 5 --eval-episodes 3 --
 python scripts/run_experiment.py --stage all --scale main --rollout-workers 4 --eval-workers 4
 ```
 
-分阶段：
+分阶段运行：
 
 ```bash
 python scripts/run_experiment.py --stage generate --scale main --eval-episodes 8
@@ -70,11 +70,13 @@ python scripts/run_experiment.py --stage report --scale main
 
 ## 默认规模
 
-- `smoke`：60 ticks + 8 buffer，80 单，120 候选车。
-- `main`：80 ticks + 14 buffer，1600 单，1900 候选车，基础入池率 0.36，供给缩放 0.50。
+- `smoke`: 60 ticks + 8 buffer，80 单，120 候选车辆。
+- `main`: 80 ticks + 14 buffer，1600 单，1900 候选车辆，基础入池率 0.36，供给缩放 0.55。
 - 每单候选车辆上限：20。
-- 每次 dispatch 固定成本：18.0。
-- top-batch 容量：活跃订单的 70%，并限制在 8 到 120 之间。
+- `MATCH_TOP_BATCH` 固定成本：18.0。
+- `MATCH_FULL` 固定成本：38.5。
+- 连续派单惩罚：最近 1 tick 内已经派单时，额外扣 10.0。
+- top-batch 容量：活跃订单的 55%，并限制在 8 到 80 之间。
 
 ## 电池健康与价格参数
 
@@ -87,7 +89,7 @@ environment.battery_health.degradation_cost_per_kwh
 environment.battery_health.max_discharge_power_kw
 ```
 
-默认：
+默认值：
 
 ```text
 donor_min_soc_ratio = 0.25
@@ -105,19 +107,23 @@ max_discharge_power_kw = 50.0
 - `outputs/<run_name>/env_health/env_health_summary.csv`
 - `outputs/<run_name>/eval/eval_summary.csv`
 - `outputs/<run_name>/eval/timing_policy_comparison.csv`
+- `outputs/<run_name>/eval/paired_policy_delta_summary.csv`
+- `outputs/<run_name>/eval/environment_acceptance_summary.csv`
 - `outputs/<run_name>/eval/dispatch_trace_by_policy.csv`
 - `outputs/<run_name>/eval/wait_tradeoff_trace.csv`
 
 关键指标：
 
 - `future_v2v_score_mean`：主排序指标。
-- `platform_profit_mean`：扣除 dispatch 固定成本后的平台利润。
-- `platform_margin_per_served_order`：不含 dispatch 固定成本的单服务边际收益。
+- `platform_profit_mean`：扣除 dispatch 固定成本和连续派单惩罚后的平台利润。
+- `platform_margin_per_served_order`：不含 dispatch 成本的单服务边际收益。
 - `energy_loss_rate`：V2V 传输损耗率，默认应约 10%。
 - `seller_compensation_share`：卖方补偿占买方支付比例。
 - `donor_soc_violation_count_mean`：必须为 0。
 - `battery_health_rejection_count_mean`：电池健康约束造成的候选拒绝规模。
 - `mean_batch_interval_mean`：越接近 1，越像一步一匹配。
+- `capacity_bind_rate`：top-batch 容量是否真的起到截断作用。
+- `paired_policy_delta_summary.csv`：优先看同场景 score delta 和 win rate，而不是只看 raw std。
 - `dynamic_timing_ready`：策略差异、batch interval、fixed_2 服务率下降和 top-batch 可用性是否同时满足 stress benchmark 条件。
 
 ## 验证

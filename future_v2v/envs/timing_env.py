@@ -181,11 +181,16 @@ class FutureV2VTimingEnv:
             result.rejected_count = len(realized) - len(accepted)
             result.dispatch_capacity = int(capacity)
             result.candidate_edge_count = len(plan.edges)
+            result.rapid_dispatch_penalty = self._rapid_dispatch_penalty(tick)
+            result.dispatch_fixed_cost = (
+                self.env_config.dispatch_cost_for_mode(dispatch_mode)
+                + result.rapid_dispatch_penalty
+            )
             result.battery_health_rejection_count = sum(
                 int(plan.rejected_reason_counts.get(reason, 0))
                 for reason in ("energy_shortage", "battery_health_floor", "discharge_power_cap")
             )
-            result.platform_profit = float(sum(match.realized_profit for match in accepted) - self.env_config.dispatch_fixed_cost)
+            result.platform_profit = float(sum(match.realized_profit for match in accepted) - result.dispatch_fixed_cost)
             if accepted:
                 result.mean_pickup_minutes = float(np.mean([match.pickup_minutes for match in accepted]))
                 result.mean_commitment_ticks = float(np.mean([match.total_commitment_ticks for match in accepted]))
@@ -520,6 +525,13 @@ class FutureV2VTimingEnv:
         raw = mid_ramp * order.cancel_sensitivity * 0.42 + late_ramp * order.cancel_sensitivity * 1.85
         return float(np.clip(raw, 0.0, 0.16))
 
+    def _rapid_dispatch_penalty(self, tick: int) -> float:
+        window = int(self.env_config.rapid_dispatch_penalty_window_ticks)
+        penalty = float(self.env_config.rapid_dispatch_penalty)
+        if window <= 0 or penalty <= 0.0 or not self.dispatch_ticks:
+            return 0.0
+        return penalty if tick - self.dispatch_ticks[-1] <= window else 0.0
+
     def _step_reward(self, result: StepResult) -> float:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
             [order for order in self.orders if order.is_active(self.current_tick)]
@@ -563,6 +575,8 @@ class FutureV2VTimingEnv:
             "accepted_count": result.accepted_count,
             "expired_count": result.expired_count,
             "cancelled_count": result.cancelled_count,
+            "dispatch_fixed_cost": result.dispatch_fixed_cost,
+            "rapid_dispatch_penalty": result.rapid_dispatch_penalty,
             "buyer_payment": result.buyer_payment,
             "seller_reimbursement": result.seller_reimbursement,
             "energy_loss_kwh": result.energy_loss_kwh,
@@ -582,6 +596,8 @@ class FutureV2VTimingEnv:
                 "action": action,
                 "dispatch_mode": ACTION_NAMES[action],
                 "dispatch_capacity": result.dispatch_capacity,
+                "dispatch_fixed_cost": result.dispatch_fixed_cost,
+                "rapid_dispatch_penalty": result.rapid_dispatch_penalty,
                 "candidate_edges": plan_edges,
                 "matched_count": result.matched_count,
                 "accepted_count": result.accepted_count,

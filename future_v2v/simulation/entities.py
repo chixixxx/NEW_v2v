@@ -181,6 +181,8 @@ class StepResult:
     dispatch_executed: bool = False
     dispatch_mode: str = "wait"
     dispatch_capacity: int = 0
+    dispatch_fixed_cost: float = 0.0
+    rapid_dispatch_penalty: float = 0.0
     candidate_edge_count: int = 0
     mean_pickup_minutes: float = 0.0
     mean_commitment_ticks: float = 0.0

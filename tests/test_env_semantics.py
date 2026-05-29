@@ -110,6 +110,42 @@ def test_dispatch_fixed_cost_is_subtracted_from_match_profit() -> None:
     assert info["step_result"].platform_profit == env.orders[0].realized_profit - 7.0
 
 
+def test_dispatch_mode_specific_costs_are_applied() -> None:
+    env = make_env()
+    env.env_config = env.env_config.__class__(
+        **{
+            **env.env_config.__dict__,
+            "dispatch_fixed_cost": 7.0,
+            "dispatch_fixed_cost_top_batch": 3.0,
+            "dispatch_fixed_cost_full": 11.0,
+        }
+    )
+    env.matcher.env_config = env.env_config
+    install_single_order_vehicle(env, max_wait_ticks=2)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
+    assert info["step_result"].dispatch_fixed_cost == 3.0
+    assert info["step_result"].platform_profit == env.orders[0].realized_profit - 3.0
+
+
+def test_rapid_dispatch_penalty_applies_to_consecutive_dispatches() -> None:
+    env = make_env()
+    env.env_config = env.env_config.__class__(
+        **{
+            **env.env_config.__dict__,
+            "dispatch_fixed_cost_top_batch": 3.0,
+            "rapid_dispatch_penalty_window_ticks": 1,
+            "rapid_dispatch_penalty": 5.0,
+        }
+    )
+    env.matcher.env_config = env.env_config
+    install_single_order_vehicle(env, max_wait_ticks=2)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
+    assert info["step_result"].dispatch_fixed_cost == 3.0
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
+    assert info["step_result"].rapid_dispatch_penalty == 5.0
+    assert info["step_result"].dispatch_fixed_cost == 8.0
+
+
 def test_action_traces_record_wait_and_dispatch() -> None:
     env = make_env()
     install_single_order_vehicle(env, max_wait_ticks=2)

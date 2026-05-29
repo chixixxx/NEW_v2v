@@ -53,7 +53,7 @@ class QueueThresholdPolicy:
 @dataclass
 class DeadlineTriggerPolicy:
     slack_threshold: int = 1
-    full_match_wait_ratio: float = 0.98
+    full_match_wait_ratio: float = 0.99
 
     name: str = "deadline_trigger_top_batch"
 
@@ -68,17 +68,17 @@ class DeadlineTriggerPolicy:
             if order.max_wait_ticks - order.waiting_ticks(env.current_tick) <= self.slack_threshold
         ]
         near_deadline_share = len(near_deadline) / max(1, len(snapshot.active_orders))
-        if max(waiting_ratios) >= self.full_match_wait_ratio or near_deadline_share >= 0.22:
+        if max(waiting_ratios) >= self.full_match_wait_ratio or near_deadline_share >= 0.30:
             return MATCH_FULL
-        near_deadline_threshold = max(2, int(np.ceil(len(snapshot.active_orders) * 0.06)))
+        near_deadline_threshold = max(3, int(np.ceil(len(snapshot.active_orders) * 0.10)))
         return MATCH_TOP_BATCH if len(near_deadline) >= near_deadline_threshold else WAIT
 
 
 @dataclass
 class SupplyDemandPressurePolicy:
-    pressure_threshold: float = 0.43
+    pressure_threshold: float = 0.55
     min_orders: int = 8
-    min_mean_edge_profit: float = 5.2
+    min_mean_edge_profit: float = 8.0
 
     name: str = "supply_demand_pressure_top_batch"
 
@@ -94,7 +94,7 @@ class SupplyDemandPressurePolicy:
         deadline_pressure = bool(waiting_ratios and max(waiting_ratios) >= 0.78)
         mean_profit = float(np.mean([edge.expected_profit for edge in snapshot.candidate_edges])) if snapshot.candidate_edges else 0.0
         edge_coverage = len({edge.order_id for edge in snapshot.candidate_edges}) / max(1, demand)
-        if deadline_pressure and pressure >= 0.58:
+        if deadline_pressure and pressure >= 0.68:
             return MATCH_FULL
         if pressure >= self.pressure_threshold or (edge_coverage >= 0.55 and mean_profit >= self.min_mean_edge_profit):
             return MATCH_TOP_BATCH
@@ -103,8 +103,9 @@ class SupplyDemandPressurePolicy:
 
 @dataclass
 class ShortLookaheadTimingPolicy:
-    min_profit_gain: float = 8.0
-    max_safe_wait_ratio: float = 0.72
+    min_profit_gain: float = 48.0
+    max_safe_wait_ratio: float = 0.92
+    min_consecutive_deadline_share: float = 0.22
 
     name: str = "short_lookahead_top_batch"
 
@@ -114,7 +115,15 @@ class ShortLookaheadTimingPolicy:
         if not snapshot.active_orders:
             return WAIT
         waiting_ratios = [order.waiting_ratio(env.current_tick) for order in snapshot.active_orders]
-        if max(waiting_ratios) >= self.max_safe_wait_ratio:
+        near_deadline_share = sum(
+            1
+            for order in snapshot.active_orders
+            if order.max_wait_ticks - order.waiting_ticks(env.current_tick) <= 1
+        ) / max(1, len(snapshot.active_orders))
+        recently_dispatched = bool(env.dispatch_ticks and env.current_tick - env.dispatch_ticks[-1] <= 1)
+        if recently_dispatched and near_deadline_share < self.min_consecutive_deadline_share:
+            return WAIT
+        if max(waiting_ratios) >= self.max_safe_wait_ratio and near_deadline_share >= 0.10:
             return MATCH_TOP_BATCH
         current_profit = sum(
             edge.expected_profit
@@ -129,13 +138,13 @@ class ShortLookaheadTimingPolicy:
         future_orders = [order for order in env.orders if order.arrival_tick == env.current_tick + 1]
         pressure = len(snapshot.active_orders) / max(1, len(snapshot.active_vehicles))
         if not future_orders:
-            return MATCH_TOP_BATCH if current_profit > self.min_profit_gain and pressure >= 0.55 else WAIT
+            return MATCH_TOP_BATCH if current_profit > self.min_profit_gain * 2.0 and pressure >= 0.62 else WAIT
         future_energy = sum(order.demand_kwh for order in future_orders)
         current_energy = sum(order.demand_kwh for order in snapshot.active_orders)
-        approximate_gain = 0.08 * future_energy + 0.03 * current_energy
-        if approximate_gain >= self.min_profit_gain and max(waiting_ratios) < 0.62:
+        approximate_gain = 0.10 * future_energy + 0.04 * current_energy
+        if approximate_gain >= self.min_profit_gain and max(waiting_ratios) < 0.78:
             return WAIT
-        return MATCH_TOP_BATCH if pressure >= 0.50 or current_profit > self.min_profit_gain * 1.5 else WAIT
+        return MATCH_TOP_BATCH if pressure >= 0.82 or current_profit > self.min_profit_gain * 3.0 else WAIT
 
 
 def default_baselines() -> list[TimingPolicy]:

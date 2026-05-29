@@ -62,6 +62,17 @@ class EnvironmentConfig:
     train_days: list[str] | None = None
     eval_days: list[str] | None = None
     battery_health: BatteryHealthConfig = field(default_factory=BatteryHealthConfig)
+    dispatch_fixed_cost_top_batch: float | None = None
+    dispatch_fixed_cost_full: float | None = None
+    rapid_dispatch_penalty_window_ticks: int = 0
+    rapid_dispatch_penalty: float = 0.0
+
+    def dispatch_cost_for_mode(self, dispatch_mode: str) -> float:
+        if dispatch_mode == "top_batch" and self.dispatch_fixed_cost_top_batch is not None:
+            return self.dispatch_fixed_cost_top_batch
+        if dispatch_mode == "full" and self.dispatch_fixed_cost_full is not None:
+            return self.dispatch_fixed_cost_full
+        return self.dispatch_fixed_cost
 
 
 @dataclass(frozen=True)

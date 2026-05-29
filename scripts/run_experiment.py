@@ -46,7 +46,7 @@ def make_env_factory(config: ProjectConfig, scale_name: str, seed: int) -> Calla
 def run_generate(config: ProjectConfig, scale_name: str, run_dir: Path, seed: int, eval_episodes: int | None) -> None:
     env = make_env_factory(config, scale_name, seed)()
     scale = config.scale(scale_name)
-    count = eval_episodes or min(8, scale.eval_episodes)
+    count = eval_episodes or scale.eval_episodes
     manifest_rows = _build_eval_manifest(env, seed=seed, count=count)
     write_csv(run_dir / "env_health" / "eval_scenario_manifest.csv", manifest_rows)
     rows = []
@@ -148,12 +148,17 @@ def run_eval(
     wait_rows = [row for result in results for row in result["wait_tradeoff_trace"]]
     detail_rows = [metric.to_row() for metric in all_metrics]
     summary_rows = summarize_metrics(all_metrics)
+    paired_rows = _paired_policy_delta_summary(all_metrics)
+    comparison_rows = _timing_policy_comparison(summary_rows, dispatch_rows)
+    acceptance_rows = _environment_acceptance_summary(summary_rows, dispatch_rows, action_rows, paired_rows)
     write_csv(run_dir / "eval" / "episode_metrics.csv", detail_rows)
     write_csv(run_dir / "eval" / "eval_summary.csv", summary_rows)
+    write_csv(run_dir / "eval" / "paired_policy_delta_summary.csv", paired_rows)
     write_csv(run_dir / "eval" / "action_trace_by_policy.csv", action_rows)
     write_csv(run_dir / "eval" / "dispatch_trace_by_policy.csv", dispatch_rows)
     write_csv(run_dir / "eval" / "wait_tradeoff_trace.csv", wait_rows)
-    write_csv(run_dir / "eval" / "timing_policy_comparison.csv", _timing_policy_comparison(summary_rows, dispatch_rows))
+    write_csv(run_dir / "eval" / "timing_policy_comparison.csv", comparison_rows)
+    write_csv(run_dir / "eval" / "environment_acceptance_summary.csv", acceptance_rows)
     write_markdown_report(
         run_dir / "eval" / "eval_report.md",
         title=f"Future V2V Timing Evaluation ({scale_name})",
@@ -284,6 +289,46 @@ def _action_distribution_rows(history: list[dict[str, float | int]]) -> list[dic
     ]
 
 
+def _paired_policy_delta_summary(
+    metrics,
+    reference_policy: str = "fixed_1_tick_full_match",
+) -> list[dict[str, object]]:
+    by_policy: dict[str, dict[str, object]] = {}
+    for metric in metrics:
+        by_policy.setdefault(metric.policy_name, {})[metric.scenario_id or str(metric.seed)] = metric
+    reference = by_policy.get(reference_policy, {})
+    rows: list[dict[str, object]] = []
+    for policy_name, values in sorted(by_policy.items()):
+        if policy_name == reference_policy:
+            continue
+        scenario_ids = sorted(set(values) & set(reference))
+        if not scenario_ids:
+            continue
+        score_delta = [values[sid].future_v2v_score - reference[sid].future_v2v_score for sid in scenario_ids]
+        profit_delta = [values[sid].platform_profit - reference[sid].platform_profit for sid in scenario_ids]
+        service_delta = [values[sid].service_rate - reference[sid].service_rate for sid in scenario_ids]
+        expired_delta = [values[sid].expired_rate - reference[sid].expired_rate for sid in scenario_ids]
+        batch_delta = [values[sid].mean_batch_interval - reference[sid].mean_batch_interval for sid in scenario_ids]
+        rows.append(
+            {
+                "policy_name": policy_name,
+                "reference_policy": reference_policy,
+                "paired_episodes": len(scenario_ids),
+                "score_delta_mean": _mean(score_delta),
+                "score_delta_std": _std(score_delta),
+                "score_win_rate": _win_rate(score_delta),
+                "profit_delta_mean": _mean(profit_delta),
+                "profit_delta_std": _std(profit_delta),
+                "profit_win_rate": _win_rate(profit_delta),
+                "service_delta_mean": _mean(service_delta),
+                "expired_delta_mean": _mean(expired_delta),
+                "batch_interval_delta_mean": _mean(batch_delta),
+            }
+        )
+    rows.sort(key=lambda row: float(row["score_delta_mean"]), reverse=True)
+    return rows
+
+
 def _load_or_build_eval_manifest(
     config: ProjectConfig,
     scale_name: str,
@@ -332,6 +377,21 @@ def _read_csv_rows(path: Path) -> list[dict[str, object]]:
         return [dict(row) for row in csv.DictReader(f)]
 
 
+def _mean(values: list[float]) -> float:
+    return float(sum(values) / max(1, len(values)))
+
+
+def _std(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    mean = _mean(values)
+    return float((sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5)
+
+
+def _win_rate(values: list[float]) -> float:
+    return float(sum(1 for value in values if value > 0.0) / max(1, len(values)))
+
+
 def _timing_policy_comparison(
     summary_rows: list[dict[str, float | str]],
     dispatch_rows: list[dict[str, object]],
@@ -359,13 +419,21 @@ def _timing_policy_comparison(
         abs(fixed_1_score),
         abs(fixed_1_top_score),
     )
+    top_batch_score_gap_ratio = abs(fixed_1_top_score - fixed_1_score) / max(
+        1.0,
+        abs(fixed_1_score),
+        abs(fixed_1_top_score),
+    )
     service_drop_fixed2_vs_fixed1 = fixed_1_service - fixed_2_service
+    fixed_1_top_dispatches = dispatch_by_policy.get("fixed_1_tick_top_batch", [])
+    fixed_1_top_bind_rate = _capacity_bind_rate(fixed_1_top_dispatches)
     comparison = []
     for row in summary_rows:
         policy_name = str(row["policy_name"])
         dispatches = dispatch_by_policy.get(policy_name, [])
         profit_values = [float(item["platform_profit"]) for item in dispatches]
         accepted_values = [float(item["accepted_count"]) for item in dispatches]
+        capacity_bind_rate = _capacity_bind_rate(dispatches)
         comparison.append(
             {
                 "policy_name": policy_name,
@@ -382,6 +450,9 @@ def _timing_policy_comparison(
                 "policy_spread_score": policy_spread_score,
                 "batch_interval_spread": batch_interval_spread,
                 "top_batch_viability": top_batch_viability,
+                "top_batch_score_gap_ratio": top_batch_score_gap_ratio,
+                "capacity_bind_rate": capacity_bind_rate,
+                "fixed_1_top_batch_capacity_bind_rate": fixed_1_top_bind_rate,
                 "service_drop_fixed2_vs_fixed1": service_drop_fixed2_vs_fixed1,
                 "full_match_cost_gap": float(row["platform_profit_mean"]) - fixed_1_profit,
                 "energy_loss_rate": row.get("energy_loss_rate", energy_loss_rate),
@@ -390,14 +461,90 @@ def _timing_policy_comparison(
                 "donor_soc_violation_count_mean": row.get("donor_soc_violation_count_mean", 0.0),
                 "battery_health_rejection_count_mean": row.get("battery_health_rejection_count_mean", 0.0),
                 "dynamic_timing_ready": bool(
-                    policy_spread_score > 150.0
+                    policy_spread_score > 300.0
                     and batch_interval_spread >= 0.8
-                    and service_drop_fixed2_vs_fixed1 <= 0.10
-                    and top_batch_viability >= 0.95
+                    and 0.04 <= service_drop_fixed2_vs_fixed1 <= 0.10
+                    and 0.05 <= top_batch_score_gap_ratio <= 0.20
+                    and 0.30 <= fixed_1_top_bind_rate <= 0.60
                 ),
             }
         )
     return comparison
+
+
+def _environment_acceptance_summary(
+    summary_rows: list[dict[str, float | str]],
+    dispatch_rows: list[dict[str, object]],
+    action_rows: list[dict[str, object]],
+    paired_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    summary_by_policy = {str(row["policy_name"]): row for row in summary_rows}
+    fixed_1 = summary_by_policy.get("fixed_1_tick_full_match", {})
+    fixed_2 = summary_by_policy.get("fixed_2_tick_full_match", {})
+    fixed_1_top = summary_by_policy.get("fixed_1_tick_top_batch", {})
+    best = max(summary_rows, key=lambda row: float(row["future_v2v_score_mean"]), default={})
+    dispatch_by_policy: dict[str, list[dict[str, object]]] = {}
+    for row in dispatch_rows:
+        dispatch_by_policy.setdefault(str(row["policy_name"]), []).append(row)
+    action_counts: dict[str, dict[str, int]] = {}
+    for row in action_rows:
+        policy = str(row["policy_name"])
+        action = str(row["action_name"])
+        action_counts.setdefault(policy, {})[action] = action_counts.setdefault(policy, {}).get(action, 0) + 1
+    fixed_1_score = float(fixed_1.get("future_v2v_score_mean", 0.0))
+    fixed_1_top_score = float(fixed_1_top.get("future_v2v_score_mean", 0.0))
+    top_batch_gap_ratio = abs(fixed_1_top_score - fixed_1_score) / max(
+        1.0,
+        abs(fixed_1_top_score),
+        abs(fixed_1_score),
+    )
+    fixed_1_service = float(fixed_1.get("service_rate_mean", 0.0))
+    fixed_2_service = float(fixed_2.get("service_rate_mean", 0.0))
+    fixed_1_expired = float(fixed_1.get("expired_rate_mean", 0.0))
+    best_score_delta = float(best.get("future_v2v_score_mean", 0.0)) - fixed_1_score
+    fixed_1_top_bind_rate = _capacity_bind_rate(dispatch_by_policy.get("fixed_1_tick_top_batch", []))
+    dqn_actions = action_counts.get("dqn_adaptive_timing", {})
+    dqn_total = sum(dqn_actions.values())
+    dqn_top_batch_rate = dqn_actions.get("match_top_batch", 0) / max(1, dqn_total) if dqn_total else 0.0
+    best_interval = float(best.get("mean_batch_interval_mean", 0.0))
+    paired_best = paired_rows[0] if paired_rows else {}
+    baseline_ready = bool(
+        best_score_delta >= 300.0
+        and 0.05 <= top_batch_gap_ratio <= 0.20
+        and 0.30 <= fixed_1_top_bind_rate <= 0.60
+        and 0.04 <= fixed_1_service - fixed_2_service <= 0.10
+        and 0.18 <= fixed_1_expired <= 0.22
+        and 1.25 <= best_interval <= 1.80
+    )
+    dqn_ready = bool(dqn_total and dqn_top_batch_rate >= 0.20)
+    return [
+        {
+            "best_policy": best.get("policy_name", ""),
+            "best_score_delta_vs_fixed1": best_score_delta,
+            "best_mean_batch_interval": best_interval,
+            "fixed1_expired_rate": fixed_1_expired,
+            "fixed2_service_drop_vs_fixed1": fixed_1_service - fixed_2_service,
+            "fixed1_top_batch_score_gap_ratio": top_batch_gap_ratio,
+            "fixed1_top_batch_capacity_bind_rate": fixed_1_top_bind_rate,
+            "dqn_top_batch_action_rate": dqn_top_batch_rate,
+            "paired_best_policy": paired_best.get("policy_name", ""),
+            "paired_best_score_delta_mean": paired_best.get("score_delta_mean", 0.0),
+            "paired_best_score_win_rate": paired_best.get("score_win_rate", 0.0),
+            "baseline_environment_ready": baseline_ready,
+            "dqn_action_ready": dqn_ready,
+            "dynamic_timing_ready": bool(baseline_ready and (dqn_ready or not dqn_total)),
+        }
+    ]
+
+
+def _capacity_bind_rate(dispatches: list[dict[str, object]]) -> float:
+    top_batch = [row for row in dispatches if str(row.get("dispatch_mode", "")) == "match_top_batch"]
+    if not top_batch:
+        return 0.0
+    return float(
+        sum(float(row.get("matched_count", 0)) >= float(row.get("dispatch_capacity", 0)) for row in top_batch)
+        / len(top_batch)
+    )
 
 
 def main() -> None:

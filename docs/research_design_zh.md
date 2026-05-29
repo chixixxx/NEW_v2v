@@ -26,7 +26,9 @@
 2 = MATCH_FULL
 ```
 
-`WAIT` 推进一个 tick，不触发匹配，订单可能继续等待、取消或过期，车辆也可能离池。`MATCH_TOP_BATCH` 先求完整约束匹配，再只执行最高价值的一部分匹配。`MATCH_FULL` 执行完整正收益匹配，主要作为 fixed/full 诊断基线。
+- `WAIT`：推进一个 tick，不触发匹配；订单可能继续等待、取消或过期，车辆也可能离池。
+- `MATCH_TOP_BATCH`：先求完整约束匹配，再只执行最高价值的一部分匹配，是主控制动作。
+- `MATCH_FULL`：执行完整正收益匹配，主要作为 fixed/full 诊断基线，也允许 DQN 在极端状态下选择。
 
 ## V2V 价格与电池健康
 
@@ -36,7 +38,7 @@
 donor_output_kwh = demand_kwh / transfer_efficiency
 ```
 
-默认 `transfer_efficiency=0.90`，即约 10% 能量以损耗形式消失。DV 可供电量不再只由 reserve 决定，而是：
+默认 `transfer_efficiency=0.90`，约 10% 能量以损耗形式消失。DV 可供电量由 reserve 和最低健康 SOC 共同约束：
 
 ```text
 available_energy =
@@ -45,7 +47,7 @@ available_energy =
 
 默认 `donor_min_soc_ratio=0.25`，防止供给车辆被放电到过低 SOC。
 
-平台利润拆为可解释双边经济结构：
+平台利润拆成可解释的双边经济结构：
 
 ```text
 buyer_payment
@@ -53,17 +55,26 @@ buyer_payment
 - platform_pickup_cost
 - seller_time_cost
 - dispatch_fixed_cost
+- rapid_dispatch_penalty
 ```
 
 卖方补偿拆为：
 
 ```text
-energy_cost
-+ degradation_cost
-+ service_premium
+energy_cost + degradation_cost + service_premium
 ```
 
-其中 `degradation_cost_per_kwh=0.08`，单独统计，不混入基础电价。
+其中 `degradation_cost_per_kwh=0.08` 单独统计，不混入基础电价。
+
+## 动态匹配压力设计
+
+主环境要体现“等待形成更好 batch”和“等待导致取消、过期、车辆离池”的权衡。
+
+- `MATCH_TOP_BATCH` 固定成本为 18.0。
+- `MATCH_FULL` 固定成本为 38.5。
+- 若最近 1 tick 内已经派单，再次派单额外扣 10.0，避免一步一匹配成为无成本默认选择。
+- top-batch 容量为活跃订单的 55%，并限制在 8 到 80 之间。
+- `short_lookahead_top_batch` 作为强规则基线时带连续触发冷却，只有临期占比足够高才允许连续派单。
 
 ## 算法路线
 
