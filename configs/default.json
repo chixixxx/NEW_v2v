@@ -1,0 +1,63 @@
+{
+  "experiment": {
+    "minutes_per_tick": 5,
+    "output_root": "outputs",
+    "run_name_template": "{scale}_latest"
+  },
+  "environment": {
+    "zone_count": 16,
+    "service_kwh_per_tick": 4.5,
+    "pickup_cap_minutes": 18.0,
+    "platform_pickup_cost_per_min": 0.06,
+    "wait_penalty_per_order_tick": 0.03,
+    "expired_penalty": 10.0,
+    "cancelled_penalty": 8.0,
+    "service_rate_target": 0.62,
+    "urgent_service_rate_target": 0.72,
+    "expired_rate_cap": 0.16,
+    "cancelled_rate_cap": 0.10,
+    "mean_pickup_soft_cap_min": 10.0,
+    "mean_commitment_soft_cap_ticks": 7.0,
+    "profit_scale_fallback": 5.0,
+    "enable_stochastic_acceptance": true,
+    "enable_stochastic_cancellation": true
+  },
+  "scales": {
+    "smoke": {
+      "horizon_ticks": 36,
+      "terminal_buffer_ticks": 4,
+      "total_orders": 80,
+      "candidate_vehicles": 120,
+      "vehicle_join_probability": 0.55,
+      "fleet_probability": 0.08,
+      "train_episodes": 20,
+      "eval_episodes": 8
+    },
+    "main": {
+      "horizon_ticks": 48,
+      "terminal_buffer_ticks": 8,
+      "total_orders": 1600,
+      "candidate_vehicles": 2100,
+      "vehicle_join_probability": 0.44,
+      "fleet_probability": 0.09,
+      "train_episodes": 300,
+      "eval_episodes": 40
+    }
+  },
+  "training": {
+    "gamma": 0.98,
+    "learning_rate": 0.0005,
+    "batch_size": 128,
+    "replay_capacity": 50000,
+    "min_replay_size": 500,
+    "target_update_interval": 100,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.08,
+    "epsilon_decay_steps": 3500,
+    "teacher_prefill_episodes": 8,
+    "hidden_dim": 128,
+    "double_dqn": true,
+    "prioritized_replay": true
+  }
+}
+

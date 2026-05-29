@@ -1,0 +1,13 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = ["outputs", ".git", ".venv", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E9", "F401", "F821", "F822", "F823", "F841", "UP037", "SIM118"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
