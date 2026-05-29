@@ -15,7 +15,7 @@ from torch import nn
 
 from future_v2v.algorithms.baselines import TimingPolicy, teacher_policies
 from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig
-from future_v2v.envs.timing_env import MATCH, FutureV2VTimingEnv
+from future_v2v.envs.timing_env import ACTION_COUNT, MATCH_FULL, MATCH_TOP_BATCH, FutureV2VTimingEnv
 from future_v2v.progress import progress
 
 
@@ -59,7 +59,7 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 2),
+            nn.Linear(hidden_dim, ACTION_COUNT),
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
@@ -84,14 +84,20 @@ class DQNTimingAgent:
         self.optimizer = torch.optim.Adam(self.online.parameters(), lr=training_config.learning_rate)
         self.replay = ReplayBuffer(training_config.replay_capacity, prioritized=training_config.prioritized_replay)
         self.global_step = 0
+        self.last_q_values: list[float] | None = None
+        self.validation_history: list[dict[str, float | int]] = []
+        self.best_state_dict: dict[str, torch.Tensor] | None = None
+        self.best_validation_score = float("-inf")
 
     def act(self, env: FutureV2VTimingEnv, obs: np.ndarray, epsilon: float = 0.0) -> int:
         _ = env
-        if random.random() < epsilon:
-            return int(random.choice([0, 1]))
         with torch.no_grad():
             tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-            return int(torch.argmax(self.online(tensor), dim=1).item())
+            q_values = self.online(tensor)
+            self.last_q_values = [float(value) for value in q_values.squeeze(0).detach().cpu().tolist()]
+            if random.random() < epsilon:
+                return int(random.choice(list(range(ACTION_COUNT))))
+            return int(torch.argmax(q_values, dim=1).item())
 
     def train(
         self,
@@ -122,12 +128,14 @@ class DQNTimingAgent:
             truncated = False
             episode_reward = 0.0
             step_count = 0
+            action_counts = [0 for _ in range(ACTION_COUNT)]
             loss_values: list[float] = []
             while not (terminated or truncated):
                 epsilon = self._epsilon()
                 action = self.act(env, obs, epsilon=epsilon)
+                action_counts[action] += 1
                 next_obs, reward, terminated, truncated, _info = env.step(action)
-                priority = 1.0 + abs(reward) / 20.0 + (0.5 if action == MATCH else 0.0)
+                priority = 1.0 + abs(reward) / 20.0 + (0.5 if action in (MATCH_TOP_BATCH, MATCH_FULL) else 0.0)
                 self.replay.add(Transition(obs, action, reward, next_obs, terminated or truncated, priority))
                 obs = next_obs
                 episode_reward += reward
@@ -149,12 +157,23 @@ class DQNTimingAgent:
                     "platform_profit": metrics.platform_profit,
                     "service_rate": metrics.service_rate,
                     "dispatch_epoch_count": metrics.dispatch_epoch_count,
+                    "wait_count": action_counts[0],
+                    "top_batch_count": action_counts[1],
+                    "full_match_count": action_counts[2],
                     "steps_per_sec": step_count / elapsed,
                     "episodes_per_sec": 1.0 / elapsed,
                     "rollout_worker_count": 1,
                     "replay_size": len(self.replay),
                 }
             )
+            self._maybe_validate(
+                env_config=env_config,
+                scale_config=scale_config,
+                seed_start=seed_start,
+                episode=episode,
+                force=episode == episodes - 1,
+            )
+        self._restore_best_checkpoint()
         return history
 
     def _train_parallel_rollouts(
@@ -205,6 +224,7 @@ class DQNTimingAgent:
                     elapsed = max(1e-9, time.perf_counter() - started_at)
                     steps = len(transitions)
                     metrics = result["metrics"]
+                    action_counts = result["action_counts"]
                     history.append(
                         {
                             "episode": episode,
@@ -215,12 +235,23 @@ class DQNTimingAgent:
                             "platform_profit": metrics.platform_profit,
                             "service_rate": metrics.service_rate,
                             "dispatch_epoch_count": metrics.dispatch_epoch_count,
+                            "wait_count": int(action_counts[0]),
+                            "top_batch_count": int(action_counts[1]),
+                            "full_match_count": int(action_counts[2]),
                             "steps_per_sec": steps / elapsed,
                             "episodes_per_sec": max(1, len(batch_ids)) / elapsed,
                             "rollout_worker_count": rollout_workers,
                             "replay_size": len(self.replay),
                         }
                     )
+                self._maybe_validate(
+                    env_config=env_config,
+                    scale_config=scale_config,
+                    seed_start=seed_start,
+                    episode=batch_ids[-1],
+                    force=batch_ids[-1] == episode_ids[-1],
+                )
+        self._restore_best_checkpoint()
         return sorted(history, key=lambda row: int(row["episode"]))
 
     def save(self, path: Path) -> None:
@@ -233,6 +264,54 @@ class DQNTimingAgent:
             },
             path,
         )
+
+    def _maybe_validate(
+        self,
+        *,
+        env_config: EnvironmentConfig | None,
+        scale_config: ScaleConfig | None,
+        seed_start: int,
+        episode: int,
+        force: bool = False,
+    ) -> None:
+        if env_config is None or scale_config is None or self.config.validation_episodes <= 0:
+            return
+        interval = max(1, int(self.config.validation_interval_episodes))
+        if not force and (episode + 1) % interval != 0:
+            return
+        scores = []
+        profits = []
+        dispatch_counts = []
+        for idx in range(self.config.validation_episodes):
+            env = FutureV2VTimingEnv(env_config, scale_config, seed=seed_start + 50_000 + idx)
+            obs, _ = env.reset(seed=seed_start + 50_000 + idx)
+            terminated = False
+            truncated = False
+            while not (terminated or truncated):
+                action = self.act(env, obs, epsilon=0.0)
+                env.set_action_q_values(self.last_q_values)
+                obs, _reward, terminated, truncated, _info = env.step(action)
+            metrics = env.episode_metrics(policy_name=self.name, seed=seed_start + 50_000 + idx)
+            scores.append(metrics.future_v2v_score)
+            profits.append(metrics.platform_profit)
+            dispatch_counts.append(metrics.dispatch_epoch_count)
+        row = {
+            "episode": episode,
+            "future_v2v_score_mean": float(np.mean(scores)),
+            "platform_profit_mean": float(np.mean(profits)),
+            "dispatch_epoch_count_mean": float(np.mean(dispatch_counts)),
+        }
+        self.validation_history.append(row)
+        score = float(row["future_v2v_score_mean"])
+        if score > self.best_validation_score:
+            self.best_validation_score = score
+            self.best_state_dict = {key: value.detach().cpu().clone() for key, value in self.online.state_dict().items()}
+
+    def _restore_best_checkpoint(self) -> None:
+        if self.best_state_dict is None:
+            return
+        self.online.load_state_dict(self.best_state_dict)
+        self.target.load_state_dict(self.best_state_dict)
 
     @classmethod
     def load(cls, path: Path, training_config: TrainingConfig, device: str | None = None) -> DQNTimingAgent:
@@ -258,7 +337,7 @@ class DQNTimingAgent:
             while not (terminated or truncated):
                 action = policy.act(env, obs)
                 next_obs, reward, terminated, truncated, _info = env.step(action)
-                priority = 1.5 + abs(reward) / 20.0 + (0.5 if action == MATCH else 0.0)
+                priority = 1.5 + abs(reward) / 20.0 + (0.5 if action in (MATCH_TOP_BATCH, MATCH_FULL) else 0.0)
                 self.replay.add(Transition(obs, action, reward, next_obs, terminated or truncated, priority))
                 obs = next_obs
 
@@ -307,10 +386,12 @@ def _run_dqn_rollout_task(
     terminated = False
     truncated = False
     episode_reward = 0.0
+    action_counts = [0 for _ in range(ACTION_COUNT)]
     while not (terminated or truncated):
         action = agent.act(env, obs, epsilon=epsilon)
+        action_counts[action] += 1
         next_obs, reward, terminated, truncated, _info = env.step(action)
-        priority = 1.0 + abs(reward) / 20.0 + (0.5 if action == MATCH else 0.0)
+        priority = 1.0 + abs(reward) / 20.0 + (0.5 if action in (MATCH_TOP_BATCH, MATCH_FULL) else 0.0)
         transitions.append(Transition(obs, action, reward, next_obs, terminated or truncated, priority))
         obs = next_obs
         episode_reward += reward
@@ -318,4 +399,5 @@ def _run_dqn_rollout_task(
         "transitions": transitions,
         "episode_reward": episode_reward,
         "metrics": env.episode_metrics(policy_name=DQNTimingAgent.name, seed=seed),
+        "action_counts": action_counts,
     }

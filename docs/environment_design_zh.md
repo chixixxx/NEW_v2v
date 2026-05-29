@@ -8,7 +8,7 @@
 - 路网层级使用 Manhattan taxi zone，不使用 16 区合成网格作为主环境。
 - travel time 使用同月黄出租 OD 在对应 60 分钟时段内的中位行程时间。
 - 缺失 OD 回退到同 OD 全时段中位数、同 origin 中位数或全局中位数。
-- 黄出租数据不被直接解释为 V2V 交易，只作为未来 V2V 需求与城市移动模式的真实校准源。
+- 黄出租数据不直接解释为 V2V 交易，只作为未来 V2V 需求与城市移动模式的真实校准源。
 
 合成 16 区网格只作为 smoke/test fallback。
 
@@ -19,10 +19,9 @@
 - 1 tick = 3 分钟。
 - `main`：80 ticks + 14 terminal buffer，约 4 小时 + 42 分钟。
 - `smoke`：60 ticks + 8 terminal buffer，约 3 小时 + 24 分钟。
+- `service_kwh_per_tick=2.7`，约等于 54 kW 服务功率。
 
-服务功率按 tick 缩放：`service_kwh_per_tick=2.7`，约等于 54 kW。
-
-## TLC 到 V2V 的改造口径
+## TLC 到 V2V 的改造
 
 - `arrival_tick` 来自出租车 pickup 时间在 episode 窗口内的位置。
 - `origin_zone` 来自 `PULocationID`，表示需求发生区域。
@@ -32,38 +31,26 @@
 - `max_wait_ticks` 不直接使用出租车等待语义，而是按时段压力生成分钟级等待窗口后转成 tick。
 - 车辆供给不直接使用同 tick 出租车作为供电车辆，而是用历史 dropoff/idle 空间分布校准入池区域，再按 V2V 业务生成电量、报价、在线时间和保留电量。
 
-## 实体属性
-
-订单保留必要属性：
-
-- 到达时间、起点区域、服务后目的区域。
-- 需求电量、最大等待窗口、单位电量愿付价。
-- 取消敏感度。
-
-车辆保留必要属性：
-
-- 入池/离池时间、当前位置、自身目的区域。
-- 电池容量、当前电量、保留电量。
-- 供电报价、时间成本、接受敏感度。
-- 是否 fleet。
-
 ## 环境压力校准
 
-当前 main 默认用于避免一步一匹配退化：
+当前 main 默认用于避免“一步一匹配”退化：
 
 - 1600 单。
 - 1900 候选车辆。
 - 基础入池率 0.36。
 - `supply_scale=0.50`。
 - 每单候选车辆上限 20。
-- 每次 dispatch 固定成本 2.0。
+- `dispatch_fixed_cost=12.0`。
+- `dispatch_capacity_ratio=0.55`，`dispatch_capacity_min=8`，`dispatch_capacity_max=80`。
+- `wait_penalty_per_order_tick=0.015`。
 
 健康目标：
 
 - `service_rate` 约 65%-82%。
 - `expired + cancelled` 约 8%-22%。
-- `mean_batch_interval` 应明显大于 1 时更能体现动态时机价值。
-- `fixed_1_tick_match` 不应接近满服务率。
+- 优良策略 `mean_batch_interval` 应落在约 1.3-2.2 ticks。
+- `fixed_1_tick_full_match` 不应稳定压倒所有策略。
+- `fixed_2_tick_full_match` 不应因为等待曲线过陡而直接崩盘。
 
 ## 约束匹配
 
@@ -74,7 +61,12 @@
 - 车辆剩余在线时间覆盖接驾和服务承诺。
 - 期望利润为正。
 
-匹配目标为最大化候选边期望利润。第一版使用 Hungarian assignment，并允许订单不匹配。所有 baseline 和 RL 策略共享同一候选图，因此比较口径一致。
+匹配器先求完整 Hungarian assignment，然后按 dispatch mode 执行：
+
+- `full`：执行完整正收益匹配。
+- `top_batch`：按 adjusted edge value 截断最高价值批次。
+
+adjusted edge value 使用期望利润、接驾惩罚、等待风险和急迫性加成，不引入额外学习模型。
 
 ## 主指标
 
@@ -87,3 +79,4 @@
 - 平均接驾时间过长。
 - 平均承诺时间过长。
 
+评估报告同时输出 action trace、dispatch trace 和 wait tradeoff trace，用于解释策略是否真的学到了动态匹配时机。

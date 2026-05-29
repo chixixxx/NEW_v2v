@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 from future_v2v.config import EnvironmentConfig, ScaleConfig
-from future_v2v.envs.timing_env import MATCH, WAIT, FutureV2VTimingEnv
+from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, WAIT, FutureV2VTimingEnv
 from future_v2v.simulation.entities import ORDER_EXPIRED, ORDER_MATCHED, Order, Vehicle
 
 
 def make_env() -> FutureV2VTimingEnv:
     env_config = EnvironmentConfig(
         zone_count=4,
+        action_space="wait_topbatch_full",
         service_kwh_per_tick=5.0,
         pickup_cap_minutes=30.0,
         platform_pickup_cost_per_min=0.0,
         dispatch_fixed_cost=0.0,
+        dispatch_capacity_ratio=0.55,
+        dispatch_capacity_min=1,
+        dispatch_capacity_max=80,
+        queue_threshold_ratio=0.35,
+        queue_threshold_min=1,
         wait_penalty_per_order_tick=0.0,
         expired_penalty=10.0,
         cancelled_penalty=8.0,
@@ -85,11 +91,12 @@ def test_wait_does_not_match_and_can_expire_order() -> None:
 def test_match_updates_order_vehicle_and_profit() -> None:
     env = make_env()
     install_single_order_vehicle(env, max_wait_ticks=2)
-    _obs, reward, _terminated, _truncated, info = env.step(MATCH)
+    _obs, reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
     assert env.orders[0].status == ORDER_MATCHED
     assert env.orders[0].matched_vehicle_id == 2
     assert env.vehicles[0].served_count == 1
     assert info["step_result"].accepted_count == 1
+    assert info["step_result"].dispatch_mode == "match_top_batch"
     assert reward > 0.0
 
 
@@ -98,5 +105,15 @@ def test_dispatch_fixed_cost_is_subtracted_from_match_profit() -> None:
     env.env_config = env.env_config.__class__(**{**env.env_config.__dict__, "dispatch_fixed_cost": 7.0})
     env.matcher.env_config = env.env_config
     install_single_order_vehicle(env, max_wait_ticks=2)
-    _obs, _reward, _terminated, _truncated, info = env.step(MATCH)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_FULL)
     assert info["step_result"].platform_profit == env.orders[0].realized_profit - 7.0
+
+
+def test_action_traces_record_wait_and_dispatch() -> None:
+    env = make_env()
+    install_single_order_vehicle(env, max_wait_ticks=2)
+    env.step(WAIT)
+    assert env.action_trace[-1]["action_name"] == "wait"
+    assert env.wait_tradeoff_trace
+    env.step(MATCH_FULL)
+    assert env.dispatch_trace[-1]["dispatch_mode"] == "match_full"

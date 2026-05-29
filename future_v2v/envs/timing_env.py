@@ -23,7 +23,14 @@ from future_v2v.simulation.network import TLCManhattanZoneNetwork, ZoneNetwork
 from future_v2v.simulation.tlc_generator import TLCManhattanScenarioGenerator
 
 WAIT = 0
-MATCH = 1
+MATCH_TOP_BATCH = 1
+MATCH_FULL = 2
+ACTION_COUNT = 3
+ACTION_NAMES = {
+    WAIT: "wait",
+    MATCH_TOP_BATCH: "match_top_batch",
+    MATCH_FULL: "match_full",
+}
 
 OBSERVATION_NAMES = (
     "active_order_count",
@@ -76,6 +83,10 @@ class FutureV2VTimingEnv:
         self.rejected_matches = 0
         self.dispatch_ticks: list[int] = []
         self.last_step_result = StepResult()
+        self.action_trace: list[dict[str, object]] = []
+        self.dispatch_trace: list[dict[str, object]] = []
+        self.wait_tradeoff_trace: list[dict[str, object]] = []
+        self._next_action_q_values: tuple[float, ...] | None = None
 
     @property
     def observation_dim(self) -> int:
@@ -97,16 +108,26 @@ class FutureV2VTimingEnv:
         self.rejected_matches = 0
         self.dispatch_ticks = []
         self.last_step_result = StepResult()
+        self.action_trace = []
+        self.dispatch_trace = []
+        self.wait_tradeoff_trace = []
+        self._next_action_q_values = None
         obs = self._observation()
         return obs, {"seed": self.seed, "observation_names": OBSERVATION_NAMES}
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
-        if action not in (WAIT, MATCH):
-            raise ValueError(f"invalid action {action}; expected WAIT=0 or MATCH=1")
+        if action not in ACTION_NAMES:
+            raise ValueError(f"invalid action {action}; expected 0=WAIT, 1=MATCH_TOP_BATCH, 2=MATCH_FULL")
         self._refresh_vehicle_status()
-        result = StepResult(dispatch_executed=action == MATCH)
-        if action == MATCH:
-            plan = self.matcher.solve(self.orders, self.vehicles, self.current_tick)
+        tick = self.current_tick
+        before_snapshot = self.snapshot()
+        q_values = self._next_action_q_values
+        self._next_action_q_values = None
+        result = StepResult(dispatch_executed=action in (MATCH_TOP_BATCH, MATCH_FULL), dispatch_mode=ACTION_NAMES[action])
+        if action in (MATCH_TOP_BATCH, MATCH_FULL):
+            dispatch_mode = "top_batch" if action == MATCH_TOP_BATCH else "full"
+            capacity = self._dispatch_capacity(before_snapshot) if action == MATCH_TOP_BATCH else len(before_snapshot.active_orders)
+            plan = self.matcher.solve(self.orders, self.vehicles, self.current_tick, dispatch_mode=dispatch_mode, capacity=capacity)
             realized = self.matcher.realize_matches(
                 plan.matches,
                 self.orders_by_id,
@@ -119,6 +140,8 @@ class FutureV2VTimingEnv:
             result.matched_count = len(realized)
             result.accepted_count = len(accepted)
             result.rejected_count = len(realized) - len(accepted)
+            result.dispatch_capacity = int(capacity)
+            result.candidate_edge_count = len(plan.edges)
             result.platform_profit = float(sum(match.realized_profit for match in accepted) - self.env_config.dispatch_fixed_cost)
             if accepted:
                 result.mean_pickup_minutes = float(np.mean([match.pickup_minutes for match in accepted]))
@@ -126,11 +149,15 @@ class FutureV2VTimingEnv:
             self.rejected_matches += result.rejected_count
             self.platform_profit += result.platform_profit
             self.dispatch_ticks.append(self.current_tick)
+            self._record_dispatch_trace(tick, action, plan_edges=len(plan.edges), result=result)
         self.current_tick += 1
         expired, cancelled = self._advance_order_lifecycle()
         result.expired_count = expired
         result.cancelled_count = cancelled
         self.last_step_result = result
+        if action == WAIT:
+            self._record_wait_tradeoff_trace(tick, before_snapshot, expired=expired, cancelled=cancelled)
+        self._record_action_trace(tick, action, before_snapshot, result, q_values)
         reward = self._step_reward(result)
         terminated = self.current_tick >= self.scale_config.horizon_ticks + self.scale_config.terminal_buffer_ticks
         truncated = False
@@ -141,6 +168,12 @@ class FutureV2VTimingEnv:
             "platform_profit": self.platform_profit,
         }
         return obs, reward, terminated, truncated, info
+
+    def set_action_q_values(self, values: list[float] | tuple[float, ...] | np.ndarray | None) -> None:
+        if values is None:
+            self._next_action_q_values = None
+            return
+        self._next_action_q_values = tuple(float(value) for value in values)
 
     def snapshot(self) -> EnvironmentSnapshot:
         active_orders = [order for order in self.orders if order.is_active(self.current_tick)]
@@ -306,19 +339,110 @@ class FutureV2VTimingEnv:
         if order.status != ORDER_PENDING:
             return 0.0
         waiting_ratio = order.waiting_ratio(self.current_tick)
-        if waiting_ratio <= 0.45:
+        if waiting_ratio <= 0.55:
             return 0.0
-        return float(np.clip((waiting_ratio - 0.45) * order.cancel_sensitivity, 0.0, 0.22))
+        late_ramp = max(0.0, waiting_ratio - 0.80)
+        raw = (waiting_ratio - 0.55) * order.cancel_sensitivity * 0.70 + late_ramp * order.cancel_sensitivity * 1.30
+        return float(np.clip(raw, 0.0, 0.18))
 
     def _step_reward(self, result: StepResult) -> float:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
             [order for order in self.orders if order.is_active(self.current_tick)]
         )
+        batch_bonus = 0.0
+        if result.dispatch_executed and result.accepted_count > 0:
+            batch_bonus = min(6.0, 0.15 * result.accepted_count)
         return (
             result.platform_profit
             - self.env_config.expired_penalty * result.expired_count
             - self.env_config.cancelled_penalty * result.cancelled_count
             - wait_penalty
+            + batch_bonus
+        )
+
+    def _dispatch_capacity(self, snapshot: EnvironmentSnapshot) -> int:
+        ratio = float(self.env_config.dispatch_capacity_ratio)
+        raw = int(np.ceil(len(snapshot.active_orders) * ratio))
+        return int(np.clip(raw, self.env_config.dispatch_capacity_min, self.env_config.dispatch_capacity_max))
+
+    def _record_action_trace(
+        self,
+        tick: int,
+        action: int,
+        snapshot: EnvironmentSnapshot,
+        result: StepResult,
+        q_values: tuple[float, ...] | None,
+    ) -> None:
+        waiting_ratios = [order.waiting_ratio(tick) for order in snapshot.active_orders]
+        near_deadline = sum(1 for order in snapshot.active_orders if order.max_wait_ticks - order.waiting_ticks(tick) <= 1)
+        row: dict[str, object] = {
+            "tick": tick,
+            "action": action,
+            "action_name": ACTION_NAMES[action],
+            "active_orders": len(snapshot.active_orders),
+            "active_vehicles": len(snapshot.active_vehicles),
+            "candidate_edges": len(snapshot.candidate_edges),
+            "near_deadline_orders": near_deadline,
+            "mean_waiting_ratio": float(np.mean(waiting_ratios)) if waiting_ratios else 0.0,
+            "matched_count": result.matched_count,
+            "accepted_count": result.accepted_count,
+            "expired_count": result.expired_count,
+            "cancelled_count": result.cancelled_count,
+        }
+        for idx in range(ACTION_COUNT):
+            row[f"q_action_{idx}"] = "" if q_values is None or idx >= len(q_values) else float(q_values[idx])
+        self.action_trace.append(row)
+
+    def _record_dispatch_trace(self, tick: int, action: int, plan_edges: int, result: StepResult) -> None:
+        profit_per_dispatch = result.platform_profit
+        profit_per_accepted = result.platform_profit / max(1, result.accepted_count)
+        self.dispatch_trace.append(
+            {
+                "tick": tick,
+                "action": action,
+                "dispatch_mode": ACTION_NAMES[action],
+                "dispatch_capacity": result.dispatch_capacity,
+                "candidate_edges": plan_edges,
+                "matched_count": result.matched_count,
+                "accepted_count": result.accepted_count,
+                "rejected_count": result.rejected_count,
+                "platform_profit": result.platform_profit,
+                "profit_per_dispatch": profit_per_dispatch,
+                "profit_per_accepted_order": profit_per_accepted,
+                "mean_pickup_minutes": result.mean_pickup_minutes,
+                "mean_commitment_ticks": result.mean_commitment_ticks,
+            }
+        )
+
+    def _record_wait_tradeoff_trace(
+        self,
+        tick: int,
+        before_snapshot: EnvironmentSnapshot,
+        *,
+        expired: int,
+        cancelled: int,
+    ) -> None:
+        after_snapshot = self.snapshot()
+        before_edges = {(edge.order_id, edge.vehicle_id): edge for edge in before_snapshot.candidate_edges}
+        after_edges = {(edge.order_id, edge.vehicle_id): edge for edge in after_snapshot.candidate_edges}
+        new_edges = [edge for key, edge in after_edges.items() if key not in before_edges]
+        before_orders = {order.order_id for order in before_snapshot.active_orders}
+        after_orders = {order.order_id for order in after_snapshot.active_orders}
+        self.wait_tradeoff_trace.append(
+            {
+                "tick": tick,
+                "active_orders_before": len(before_snapshot.active_orders),
+                "active_orders_after": len(after_snapshot.active_orders),
+                "new_active_orders": len(after_orders - before_orders),
+                "candidate_edges_before": len(before_snapshot.candidate_edges),
+                "candidate_edges_after": len(after_snapshot.candidate_edges),
+                "new_candidate_edges": len(new_edges),
+                "candidate_profit_delta": sum(edge.expected_profit for edge in after_snapshot.candidate_edges)
+                - sum(edge.expected_profit for edge in before_snapshot.candidate_edges),
+                "new_candidate_profit": sum(edge.expected_profit for edge in new_edges),
+                "expired_after_wait": expired,
+                "cancelled_after_wait": cancelled,
+            }
         )
 
     def _profit_scale(self) -> float:

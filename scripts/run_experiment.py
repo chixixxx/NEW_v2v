@@ -14,7 +14,7 @@ from future_v2v.algorithms.baselines import default_baselines, policy_from_name,
 from future_v2v.algorithms.dqn import DQNTimingAgent
 from future_v2v.config import ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
-from future_v2v.metrics import EpisodeMetrics, summarize_metrics, write_csv
+from future_v2v.metrics import summarize_metrics, write_csv
 from future_v2v.progress import progress
 from future_v2v.reporting import write_markdown_report
 
@@ -85,13 +85,16 @@ def run_train(
         scale_config=config.scale(scale_name),
     )
     write_csv(run_dir / "train" / "train_history.csv", history)
+    write_csv(run_dir / "train" / "validation_history.csv", agent.validation_history)
+    write_csv(run_dir / "train" / "action_distribution.csv", _action_distribution_rows(history))
     agent.save(run_dir / "train" / "dqn_timing_agent.pt")
     write_markdown_report(
         run_dir / "train" / "train_report.md",
         title=f"DQN Timing Training ({scale_name})",
         summary_lines=[
-            "训练目标是学习 WAIT/MATCH 时机，匹配边仍由约束优化器决定。",
+            "训练目标是学习 WAIT / MATCH_TOP_BATCH / MATCH_FULL 时机，匹配边仍由约束优化器决定。",
             f"episodes={train_episodes}, replay_prefill={config.training.teacher_prefill_episodes}, rollout_workers={worker_count}",
+            f"validation_episodes={config.training.validation_episodes}, checkpoint_metric={config.training.checkpoint_selection_metric}",
         ],
         table_rows=history[-10:],
     )
@@ -118,18 +121,26 @@ def run_eval(
                 executor.submit(_run_eval_task, config, scale_name, seed + idx, policy_spec)
                 for policy_spec, idx in tasks
             ]
-            all_metrics = [
+            results = [
                 future.result()
                 for future in progress(futures, desc="eval policies", total=len(futures), unit="episode")
             ]
     else:
-        all_metrics = []
+        results = []
         for policy_spec, idx in progress(tasks, desc="eval policies", total=len(tasks), unit="episode"):
-            all_metrics.append(_run_eval_task(config, scale_name, seed + idx, policy_spec))
+            results.append(_run_eval_task(config, scale_name, seed + idx, policy_spec))
+    all_metrics = [result["metrics"] for result in results]
+    action_rows = [row for result in results for row in result["action_trace"]]
+    dispatch_rows = [row for result in results for row in result["dispatch_trace"]]
+    wait_rows = [row for result in results for row in result["wait_tradeoff_trace"]]
     detail_rows = [metric.to_row() for metric in all_metrics]
     summary_rows = summarize_metrics(all_metrics)
     write_csv(run_dir / "eval" / "episode_metrics.csv", detail_rows)
     write_csv(run_dir / "eval" / "eval_summary.csv", summary_rows)
+    write_csv(run_dir / "eval" / "action_trace_by_policy.csv", action_rows)
+    write_csv(run_dir / "eval" / "dispatch_trace_by_policy.csv", dispatch_rows)
+    write_csv(run_dir / "eval" / "wait_tradeoff_trace.csv", wait_rows)
+    write_csv(run_dir / "eval" / "timing_policy_comparison.csv", _timing_policy_comparison(summary_rows, dispatch_rows))
     write_markdown_report(
         run_dir / "eval" / "eval_report.md",
         title=f"Future V2V Timing Evaluation ({scale_name})",
@@ -149,7 +160,7 @@ def run_report(run_dir: Path) -> None:
     lines = [
         "# Future V2V Adaptive Timing Run Report",
         "",
-        "本总报告汇总环境健康、训练和评估三个部分。详细 CSV 保留在各自目录中。",
+        "本总报告汇总环境健康、训练和评估三部分。详细 CSV 保留在各自目录中。",
         "",
     ]
     for label, path in [("环境健康", health_report), ("训练", train_report), ("评估", eval_report)]:
@@ -170,7 +181,7 @@ def _run_eval_task(
     scale_name: str,
     seed: int,
     policy_spec: tuple[str, str],
-) -> EpisodeMetrics:
+) -> dict[str, object]:
     env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed)
     kind, value = policy_spec
     if kind == "baseline":
@@ -181,7 +192,65 @@ def _run_eval_task(
         _ = obs
     else:
         raise ValueError(f"unknown policy spec kind: {kind}")
-    return run_policy_episode(env, policy, seed=seed)
+    metrics = run_policy_episode(env, policy, seed=seed)
+    return {
+        "metrics": metrics,
+        "action_trace": _tag_trace_rows(env.action_trace, policy_name=metrics.policy_name, seed=seed),
+        "dispatch_trace": _tag_trace_rows(env.dispatch_trace, policy_name=metrics.policy_name, seed=seed),
+        "wait_tradeoff_trace": _tag_trace_rows(env.wait_tradeoff_trace, policy_name=metrics.policy_name, seed=seed),
+    }
+
+
+def _tag_trace_rows(rows: list[dict[str, object]], *, policy_name: str, seed: int) -> list[dict[str, object]]:
+    tagged = []
+    for row in rows:
+        materialized = {"policy_name": policy_name, "seed": seed}
+        materialized.update(row)
+        tagged.append(materialized)
+    return tagged
+
+
+def _action_distribution_rows(history: list[dict[str, float | int]]) -> list[dict[str, object]]:
+    return [
+        {
+            "episode": row["episode"],
+            "wait_count": row.get("wait_count", 0),
+            "top_batch_count": row.get("top_batch_count", 0),
+            "full_match_count": row.get("full_match_count", 0),
+        }
+        for row in history
+    ]
+
+
+def _timing_policy_comparison(
+    summary_rows: list[dict[str, float | str]],
+    dispatch_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    dispatch_by_policy: dict[str, list[dict[str, object]]] = {}
+    for row in dispatch_rows:
+        dispatch_by_policy.setdefault(str(row["policy_name"]), []).append(row)
+    comparison = []
+    for row in summary_rows:
+        policy_name = str(row["policy_name"])
+        dispatches = dispatch_by_policy.get(policy_name, [])
+        profit_values = [float(item["platform_profit"]) for item in dispatches]
+        accepted_values = [float(item["accepted_count"]) for item in dispatches]
+        comparison.append(
+            {
+                "policy_name": policy_name,
+                "future_v2v_score_mean": row["future_v2v_score_mean"],
+                "platform_profit_mean": row["platform_profit_mean"],
+                "service_rate_mean": row["service_rate_mean"],
+                "expired_rate_mean": row["expired_rate_mean"],
+                "cancelled_rate_mean": row["cancelled_rate_mean"],
+                "mean_batch_interval_mean": row["mean_batch_interval_mean"],
+                "dispatch_epoch_count_mean": row["dispatch_epoch_count_mean"],
+                "mean_profit_per_dispatch": sum(profit_values) / max(1, len(profit_values)),
+                "mean_accepted_per_dispatch": sum(accepted_values) / max(1, len(accepted_values)),
+                "timing_degeneracy": bool(float(row["mean_batch_interval_mean"]) <= 1.15),
+            }
+        )
+    return comparison
 
 
 def main() -> None:
@@ -217,4 +286,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

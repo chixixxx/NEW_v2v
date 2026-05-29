@@ -68,10 +68,18 @@ class ConstrainedMatcher:
             reason=reason,
         )
 
-    def solve(self, orders: list[Order], vehicles: list[Vehicle], tick: int) -> MatchPlan:
+    def solve(
+        self,
+        orders: list[Order],
+        vehicles: list[Vehicle],
+        tick: int,
+        dispatch_mode: str = "full",
+        capacity: int | None = None,
+    ) -> MatchPlan:
         edges = self.build_edges(orders, vehicles, tick)
         if not edges:
             return MatchPlan(edges=[], matches=[])
+        orders_by_id = {order.order_id: order for order in orders}
         active_order_ids = sorted({edge.order_id for edge in edges})
         active_vehicle_ids = sorted({edge.vehicle_id for edge in edges})
         order_index = {order_id: idx for idx, order_id in enumerate(active_order_ids)}
@@ -92,7 +100,26 @@ class ConstrainedMatcher:
             order_id = active_order_ids[row]
             vehicle_id = active_vehicle_ids[col]
             matches.append(edge_by_pair[(order_id, vehicle_id)])
+        if dispatch_mode == "top_batch":
+            limit = max(0, int(capacity or 0))
+            if limit <= 0:
+                matches = []
+            elif len(matches) > limit:
+                matches = sorted(
+                    matches,
+                    key=lambda edge: self._adjusted_edge_value(edge, orders_by_id[edge.order_id], tick),
+                    reverse=True,
+                )[:limit]
+        elif dispatch_mode != "full":
+            raise ValueError(f"unknown dispatch_mode={dispatch_mode!r}; expected 'full' or 'top_batch'")
         return MatchPlan(edges=edges, matches=matches)
+
+    def _adjusted_edge_value(self, edge: CandidateEdge, order: Order, tick: int) -> float:
+        wait_ratio = order.waiting_ratio(tick)
+        pickup_penalty = 0.08 * edge.pickup_minutes
+        wait_risk_penalty = 2.5 * max(0.0, wait_ratio - 0.55)
+        urgency_bonus = 1.5 if order.is_urgent() or wait_ratio >= 0.75 else 0.0
+        return edge.expected_profit - pickup_penalty - wait_risk_penalty + urgency_bonus
 
     def realize_matches(
         self,
