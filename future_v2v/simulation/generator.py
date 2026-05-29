@@ -15,6 +15,7 @@ class Scenario:
     source: str = "synthetic"
     day: str = ""
     start_tick_day: int = 0
+    scenario_id: str = ""
 
 
 class ScenarioGenerator:
@@ -89,9 +90,9 @@ class ScenarioGenerator:
                 online_duration = int(rng.integers(80, 190) / self.env_config.tick_minutes)
             leave_tick = min(horizon, join_tick + online_duration)
             capacity = float(rng.choice([55.0, 65.0, 75.0, 90.0, 105.0]))
-            soc_ratio = float(rng.uniform(0.48, 0.88 if fleet else 0.80))
+            soc_ratio = self._sample_soc_ratio(rng, fleet=fleet)
             reserve = float(rng.uniform(10.0, 22.0))
-            reservation_price = float(rng.normal(2.4 if fleet else 3.0, 0.35))
+            reservation_price = self._sample_reservation_price(rng, fleet=fleet)
             time_cost = float(np.clip(rng.normal(0.055 if fleet else 0.075, 0.018), 0.02, 0.13))
             accept_sensitivity = float(np.clip(rng.normal(0.75 if fleet else 0.95, 0.12), 0.45, 1.35))
             current_zone = int(rng.integers(0, self.env_config.zone_count))
@@ -116,3 +117,17 @@ class ScenarioGenerator:
             _ = candidate_id
         vehicles.sort(key=lambda vehicle: (vehicle.join_tick, vehicle.vehicle_id))
         return vehicles
+
+    @staticmethod
+    def _sample_soc_ratio(rng: np.random.Generator, *, fleet: bool) -> float:
+        if fleet:
+            raw = rng.beta(7.0, 3.0)
+            return float(np.clip(0.45 + 0.48 * raw, 0.48, 0.90))
+        raw = rng.beta(5.2, 3.8)
+        return float(np.clip(0.38 + 0.50 * raw, 0.42, 0.84))
+
+    @staticmethod
+    def _sample_reservation_price(rng: np.random.Generator, *, fleet: bool) -> float:
+        energy_cost = float(np.clip(rng.lognormal(mean=np.log(0.22 if fleet else 0.28), sigma=0.18), 0.12, 0.55))
+        service_premium = float(np.clip(rng.lognormal(mean=np.log(1.85 if fleet else 2.35), sigma=0.22), 1.0, 4.2))
+        return float(np.clip(energy_cost + service_premium, 1.35, 4.75))

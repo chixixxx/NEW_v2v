@@ -31,6 +31,9 @@ class EpisodeMetrics:
     fleet_utilization: float
     private_utilization: float
     energy_utilization: float
+    scenario_id: str = ""
+    scenario_day: str = ""
+    scenario_start_tick_day: int = 0
 
     @property
     def service_rate(self) -> float:

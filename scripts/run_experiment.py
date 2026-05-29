@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -10,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from future_v2v.algorithms.baselines import default_baselines, policy_from_name, run_policy_episode
+from future_v2v.algorithms.baselines import TimingPolicy, default_baselines, policy_from_name, run_policy_episode
 from future_v2v.algorithms.dqn import DQNTimingAgent
 from future_v2v.config import ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
@@ -46,10 +47,21 @@ def run_generate(config: ProjectConfig, scale_name: str, run_dir: Path, seed: in
     env = make_env_factory(config, scale_name, seed)()
     scale = config.scale(scale_name)
     count = eval_episodes or min(8, scale.eval_episodes)
-    rows = [
-        env.env_health_row(seed + idx)
-        for idx in progress(range(count), desc="generate env health", total=count, unit="seed")
-    ]
+    manifest_rows = _build_eval_manifest(env, seed=seed, count=count)
+    write_csv(run_dir / "env_health" / "eval_scenario_manifest.csv", manifest_rows)
+    rows = []
+    for scenario in progress(manifest_rows, desc="generate env health", total=len(manifest_rows), unit="seed"):
+        if str(scenario.get("day", "")):
+            rows.append(
+                env.env_health_row_for_window(
+                    seed=int(scenario["seed"]),
+                    day=str(scenario["day"]),
+                    start_tick_day=int(scenario["start_tick_day"]),
+                    scenario_id=str(scenario["scenario_id"]),
+                )
+            )
+        else:
+            rows.append(env.env_health_row(int(scenario["seed"])))
     write_csv(run_dir / "env_health" / "env_health_summary.csv", rows)
     write_markdown_report(
         run_dir / "env_health" / "env_health_report.md",
@@ -110,16 +122,17 @@ def run_eval(
 ) -> None:
     scale = config.scale(scale_name)
     count = eval_episodes or scale.eval_episodes
+    manifest_rows = _load_or_build_eval_manifest(config, scale_name, run_dir, seed=seed, count=count)
     policy_specs: list[tuple[str, str]] = [("baseline", policy.name) for policy in default_baselines()]
     checkpoint = run_dir / "train" / "dqn_timing_agent.pt"
     if checkpoint.exists():
         policy_specs.append(("dqn", str(checkpoint)))
-    tasks = [(policy_spec, idx) for policy_spec in policy_specs for idx in range(count)]
+    tasks = [(policy_spec, scenario) for policy_spec in policy_specs for scenario in manifest_rows]
     if eval_workers > 1:
         with ProcessPoolExecutor(max_workers=eval_workers) as executor:
             futures = [
-                executor.submit(_run_eval_task, config, scale_name, seed + idx, policy_spec)
-                for policy_spec, idx in tasks
+                executor.submit(_run_eval_task, config, scale_name, scenario, policy_spec)
+                for policy_spec, scenario in tasks
             ]
             results = [
                 future.result()
@@ -127,8 +140,8 @@ def run_eval(
             ]
     else:
         results = []
-        for policy_spec, idx in progress(tasks, desc="eval policies", total=len(tasks), unit="episode"):
-            results.append(_run_eval_task(config, scale_name, seed + idx, policy_spec))
+        for policy_spec, scenario in progress(tasks, desc="eval policies", total=len(tasks), unit="episode"):
+            results.append(_run_eval_task(config, scale_name, scenario, policy_spec))
     all_metrics = [result["metrics"] for result in results]
     action_rows = [row for result in results for row in result["action_trace"]]
     dispatch_rows = [row for result in results for row in result["dispatch_trace"]]
@@ -147,7 +160,7 @@ def run_eval(
         summary_lines=[
             "主表按 future_v2v_score_mean 排序；profit、服务率、取消和过期是辅助解释指标。",
             "timing_degenerate_risk=True 表示策略可能退化为过于频繁的一步匹配。",
-            f"episodes_per_policy={count}, eval_workers={eval_workers}",
+            f"episodes_per_policy={len(manifest_rows)}, eval_workers={eval_workers}",
         ],
         table_rows=summary_rows,
     )
@@ -179,32 +192,81 @@ def run_report(run_dir: Path) -> None:
 def _run_eval_task(
     config: ProjectConfig,
     scale_name: str,
-    seed: int,
+    scenario: dict[str, object],
     policy_spec: tuple[str, str],
 ) -> dict[str, object]:
+    seed = int(scenario["seed"])
     env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed)
     kind, value = policy_spec
     if kind == "baseline":
         policy = policy_from_name(value)
     elif kind == "dqn":
-        obs, _ = env.reset(seed=seed)
+        obs, _ = _reset_eval_env(env, scenario)
         policy = DQNTimingAgent.load(Path(value), config.training)
         _ = obs
     else:
         raise ValueError(f"unknown policy spec kind: {kind}")
-    metrics = run_policy_episode(env, policy, seed=seed)
+    metrics = _run_policy_episode_for_scenario(env, policy, scenario=scenario)
     return {
         "metrics": metrics,
-        "action_trace": _tag_trace_rows(env.action_trace, policy_name=metrics.policy_name, seed=seed),
-        "dispatch_trace": _tag_trace_rows(env.dispatch_trace, policy_name=metrics.policy_name, seed=seed),
-        "wait_tradeoff_trace": _tag_trace_rows(env.wait_tradeoff_trace, policy_name=metrics.policy_name, seed=seed),
+        "action_trace": _tag_trace_rows(
+            env.action_trace,
+            policy_name=metrics.policy_name,
+            seed=seed,
+            scenario_id=metrics.scenario_id,
+        ),
+        "dispatch_trace": _tag_trace_rows(
+            env.dispatch_trace,
+            policy_name=metrics.policy_name,
+            seed=seed,
+            scenario_id=metrics.scenario_id,
+        ),
+        "wait_tradeoff_trace": _tag_trace_rows(
+            env.wait_tradeoff_trace,
+            policy_name=metrics.policy_name,
+            seed=seed,
+            scenario_id=metrics.scenario_id,
+        ),
     }
 
 
-def _tag_trace_rows(rows: list[dict[str, object]], *, policy_name: str, seed: int) -> list[dict[str, object]]:
+def _reset_eval_env(env: FutureV2VTimingEnv, scenario: dict[str, object]):
+    day = str(scenario.get("day", ""))
+    seed = int(scenario["seed"])
+    if day:
+        return env.reset_to_tlc_window(
+            seed=seed,
+            day=day,
+            start_tick_day=int(scenario["start_tick_day"]),
+            scenario_id=str(scenario.get("scenario_id", f"eval_{seed}")),
+        )
+    return env.reset(seed=seed)
+
+
+def _run_policy_episode_for_scenario(env: FutureV2VTimingEnv, policy: TimingPolicy, *, scenario: dict[str, object]):
+    seed = int(scenario["seed"])
+    if not str(scenario.get("day", "")):
+        return run_policy_episode(env, policy, seed=seed)
+    obs, _ = _reset_eval_env(env, scenario)
+    terminated = False
+    truncated = False
+    while not (terminated or truncated):
+        action = policy.act(env, obs)
+        env.set_action_q_values(getattr(policy, "last_q_values", None))
+        obs, _reward, terminated, truncated, _info = env.step(action)
+    return env.episode_metrics(policy_name=policy.name, seed=seed)
+
+
+def _tag_trace_rows(
+    rows: list[dict[str, object]],
+    *,
+    policy_name: str,
+    seed: int,
+    scenario_id: str,
+) -> list[dict[str, object]]:
     tagged = []
     for row in rows:
-        materialized = {"policy_name": policy_name, "seed": seed}
+        materialized = {"policy_name": policy_name, "seed": seed, "scenario_id": scenario_id}
         materialized.update(row)
         tagged.append(materialized)
     return tagged
@@ -220,6 +282,54 @@ def _action_distribution_rows(history: list[dict[str, float | int]]) -> list[dic
         }
         for row in history
     ]
+
+
+def _load_or_build_eval_manifest(
+    config: ProjectConfig,
+    scale_name: str,
+    run_dir: Path,
+    *,
+    seed: int,
+    count: int,
+) -> list[dict[str, object]]:
+    path = run_dir / "env_health" / "eval_scenario_manifest.csv"
+    if path.exists():
+        rows = _read_csv_rows(path)
+        if len(rows) >= count:
+            return rows[:count]
+    env = make_env_factory(config, scale_name, seed)()
+    rows = _build_eval_manifest(env, seed=seed, count=count)
+    write_csv(path, rows)
+    return rows
+
+
+def _build_eval_manifest(env: FutureV2VTimingEnv, *, seed: int, count: int) -> list[dict[str, object]]:
+    generator = getattr(env, "generator", None)
+    rows: list[dict[str, object]] = []
+    if hasattr(generator, "manifest_row"):
+        for idx in range(count):
+            rows.append(generator.manifest_row(seed=seed + idx, scenario_id=f"eval_{idx:03d}"))
+        return rows
+    for idx in range(count):
+        rows.append(
+            {
+                "scenario_id": f"eval_{idx:03d}",
+                "seed": seed + idx,
+                "day": "",
+                "start_tick_day": "",
+                "time_of_day_bucket": "",
+                "raw_tlc_rows": "",
+                "mean_zone_pressure": "",
+                "mean_wtp_proxy": "",
+                "mean_duration_minutes": "",
+            }
+        )
+    return rows
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, object]]:
+    with path.open("r", encoding="utf-8", newline="") as f:
+        return [dict(row) for row in csv.DictReader(f)]
 
 
 def _timing_policy_comparison(

@@ -87,6 +87,9 @@ class FutureV2VTimingEnv:
         self.dispatch_trace: list[dict[str, object]] = []
         self.wait_tradeoff_trace: list[dict[str, object]] = []
         self._next_action_q_values: tuple[float, ...] | None = None
+        self.scenario_id = ""
+        self.scenario_day = ""
+        self.scenario_start_tick_day = 0
 
     @property
     def observation_dim(self) -> int:
@@ -97,6 +100,29 @@ class FutureV2VTimingEnv:
             self.seed = seed
         self.rng = np.random.default_rng(self.seed)
         scenario = self.generator.generate(self.seed)
+        return self._reset_with_scenario(scenario)
+
+    def reset_to_tlc_window(
+        self,
+        *,
+        seed: int,
+        day: str,
+        start_tick_day: int,
+        scenario_id: str = "",
+    ) -> tuple[np.ndarray, dict[str, object]]:
+        if not isinstance(self.generator, TLCManhattanScenarioGenerator):
+            return self.reset(seed=seed)
+        self.seed = int(seed)
+        self.rng = np.random.default_rng(self.seed)
+        scenario = self.generator.generate_from_window(
+            seed=self.seed,
+            day=day,
+            start_tick_day=int(start_tick_day),
+            scenario_id=scenario_id,
+        )
+        return self._reset_with_scenario(scenario)
+
+    def _reset_with_scenario(self, scenario) -> tuple[np.ndarray, dict[str, object]]:
         if hasattr(self.network, "set_episode_context"):
             self.network.set_episode_context(start_tick_day=scenario.start_tick_day)
         self.orders = scenario.orders
@@ -112,8 +138,17 @@ class FutureV2VTimingEnv:
         self.dispatch_trace = []
         self.wait_tradeoff_trace = []
         self._next_action_q_values = None
+        self.scenario_id = scenario.scenario_id
+        self.scenario_day = scenario.day
+        self.scenario_start_tick_day = int(scenario.start_tick_day)
         obs = self._observation()
-        return obs, {"seed": self.seed, "observation_names": OBSERVATION_NAMES}
+        return obs, {
+            "seed": self.seed,
+            "observation_names": OBSERVATION_NAMES,
+            "scenario_id": self.scenario_id,
+            "day": self.scenario_day,
+            "start_tick_day": self.scenario_start_tick_day,
+        }
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
         if action not in ACTION_NAMES:
@@ -235,11 +270,38 @@ class FutureV2VTimingEnv:
             fleet_utilization=self._vehicle_utilization(fleet),
             private_utilization=self._vehicle_utilization(private),
             energy_utilization=used_energy / max(1.0, initial_available_energy),
+            scenario_id=self.scenario_id,
+            scenario_day=self.scenario_day,
+            scenario_start_tick_day=self.scenario_start_tick_day,
         )
 
     def env_health_row(self, seed: int) -> dict[str, float | int]:
         obs, _ = self.reset(seed=seed)
         _ = obs
+        return self._env_health_current_scenario(seed)
+
+    def env_health_row_for_window(
+        self,
+        *,
+        seed: int,
+        day: str,
+        start_tick_day: int,
+        scenario_id: str,
+    ) -> dict[str, float | int | str]:
+        obs, _ = self.reset_to_tlc_window(
+            seed=seed,
+            day=day,
+            start_tick_day=start_tick_day,
+            scenario_id=scenario_id,
+        )
+        _ = obs
+        row = self._env_health_current_scenario(seed)
+        row["scenario_id"] = scenario_id
+        row["day"] = day
+        row["start_tick_day"] = int(start_tick_day)
+        return row
+
+    def _env_health_current_scenario(self, seed: int) -> dict[str, float | int]:
         supply_demand_ratios = []
         feasible_densities = []
         active_orders = []

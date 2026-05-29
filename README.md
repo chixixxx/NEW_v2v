@@ -45,3 +45,5 @@ python -m ruff check future_v2v scripts tests
 ## Episode demand scale
 
 `scales.<scale>.total_orders` is a fixed episode order count, not an upper bound. TLC rows calibrate temporal-spatial demand, OD structure, travel time, and price strength. Sparse sampled windows are resampled with zone-pressure weights so evaluation does not mix different order scales.
+
+`outputs/<run_name>/env_health/eval_scenario_manifest.csv` stores fixed evaluation windows. When present, `eval` reuses those scenarios so repeated evaluations compare policies on the same Manhattan demand windows.

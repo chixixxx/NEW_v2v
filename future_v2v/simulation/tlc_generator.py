@@ -20,6 +20,18 @@ class TLCManhattanScenarioGenerator:
     def generate(self, seed: int) -> Scenario:
         rng = np.random.default_rng(seed)
         day, start_tick_day, rows = self._select_window(rng)
+        return self.generate_from_window(
+            seed=seed,
+            day=day,
+            start_tick_day=start_tick_day,
+            scenario_id=f"seed_{seed}",
+        )
+
+    def generate_from_window(self, *, seed: int, day: str, start_tick_day: int, scenario_id: str = "") -> Scenario:
+        rng = np.random.default_rng(seed)
+        rows = self.data.rows_for_window(day, start_tick_day, self.scale_config.horizon_ticks)
+        if rows.empty:
+            raise RuntimeError(f"No TLC Manhattan rows found for manifest window day={day}, start_tick_day={start_tick_day}.")
         sampled_orders = self._sample_order_rows(rows, rng)
         orders = self._generate_orders(sampled_orders, start_tick_day, rng)
         vehicles = self._generate_vehicles(start_tick_day, rng)
@@ -29,7 +41,52 @@ class TLCManhattanScenarioGenerator:
             source="tlc_manhattan",
             day=day,
             start_tick_day=start_tick_day,
+            scenario_id=scenario_id,
         )
+
+    def manifest_row(self, *, seed: int, scenario_id: str | None = None) -> dict[str, float | int | str]:
+        rng = np.random.default_rng(seed)
+        day, start_tick_day, rows = self._select_window(rng)
+        return self.manifest_row_for_window(
+            seed=seed,
+            day=day,
+            start_tick_day=start_tick_day,
+            scenario_id=scenario_id or f"eval_{seed}",
+            rows=rows,
+        )
+
+    def manifest_row_for_window(
+        self,
+        *,
+        seed: int,
+        day: str,
+        start_tick_day: int,
+        scenario_id: str,
+        rows: pd.DataFrame | None = None,
+    ) -> dict[str, float | int | str]:
+        window_rows = rows if rows is not None else self.data.rows_for_window(day, start_tick_day, self.scale_config.horizon_ticks)
+        if window_rows.empty:
+            raw_rows = 0
+            mean_pressure = 0.0
+            mean_price = 0.0
+            mean_duration = 0.0
+        else:
+            raw_rows = int(len(window_rows))
+            mean_pressure = float(window_rows["zone_pressure"].mean())
+            mean_price = float(window_rows["willingness_to_pay_proxy"].mean())
+            mean_duration = float(window_rows["duration_minutes"].mean())
+        bucket = self._time_of_day_bucket(start_tick_day)
+        return {
+            "scenario_id": scenario_id,
+            "seed": int(seed),
+            "day": str(day),
+            "start_tick_day": int(start_tick_day),
+            "time_of_day_bucket": bucket,
+            "raw_tlc_rows": raw_rows,
+            "mean_zone_pressure": mean_pressure,
+            "mean_wtp_proxy": mean_price,
+            "mean_duration_minutes": mean_duration,
+        }
 
     def _select_window(self, rng: np.random.Generator) -> tuple[str, int, pd.DataFrame]:
         available_days = self._eligible_days()
@@ -63,6 +120,16 @@ class TLCManhattanScenarioGenerator:
             return 0
         sample_rate = max(0.01, self.env_config.demand_sample_rate)
         return max(20, int(np.ceil(self.scale_config.total_orders / sample_rate)))
+
+    def _time_of_day_bucket(self, tick_day: int) -> str:
+        hour = (tick_day * self.env_config.tick_minutes) / 60.0
+        if 6 <= hour < 10:
+            return "morning_peak"
+        if 10 <= hour < 15:
+            return "midday"
+        if 15 <= hour < 20:
+            return "evening_peak"
+        return "off_peak"
 
     def _eligible_days(self) -> list[str]:
         configured = self.env_config.train_days or self.env_config.eval_days or []
@@ -141,9 +208,9 @@ class TLCManhattanScenarioGenerator:
             if leave_tick <= join_tick:
                 leave_tick = min(horizon, join_tick + 1)
             capacity = float(rng.choice([55.0, 65.0, 75.0, 90.0, 105.0]))
-            soc_ratio = float(rng.uniform(0.48, 0.88 if fleet else 0.80))
+            soc_ratio = self._sample_soc_ratio(rng, fleet=fleet)
             reserve = float(rng.uniform(10.0, 22.0))
-            reservation_price = float(np.clip(rng.normal(2.35 if fleet else 3.05, 0.38), 1.5, 4.5))
+            reservation_price = self._sample_reservation_price(rng, fleet=fleet)
             time_cost = float(np.clip(rng.normal(0.055 if fleet else 0.075, 0.018), 0.02, 0.13))
             accept_sensitivity = float(np.clip(rng.normal(0.72 if fleet else 0.95, 0.12), 0.45, 1.35))
             vehicles.append(
@@ -185,3 +252,17 @@ class TLCManhattanScenarioGenerator:
             return None
         idx = int(rng.integers(0, len(rows)))
         return rows.iloc[idx]
+
+    @staticmethod
+    def _sample_soc_ratio(rng: np.random.Generator, *, fleet: bool) -> float:
+        if fleet:
+            raw = rng.beta(7.0, 3.0)
+            return float(np.clip(0.45 + 0.48 * raw, 0.48, 0.90))
+        raw = rng.beta(5.2, 3.8)
+        return float(np.clip(0.38 + 0.50 * raw, 0.42, 0.84))
+
+    @staticmethod
+    def _sample_reservation_price(rng: np.random.Generator, *, fleet: bool) -> float:
+        energy_cost = float(np.clip(rng.lognormal(mean=np.log(0.22 if fleet else 0.28), sigma=0.18), 0.12, 0.55))
+        service_premium = float(np.clip(rng.lognormal(mean=np.log(1.85 if fleet else 2.35), sigma=0.22), 1.0, 4.2))
+        return float(np.clip(energy_cost + service_premium, 1.35, 4.75))
