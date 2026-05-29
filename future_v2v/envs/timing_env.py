@@ -339,11 +339,12 @@ class FutureV2VTimingEnv:
         if order.status != ORDER_PENDING:
             return 0.0
         waiting_ratio = order.waiting_ratio(self.current_tick)
-        if waiting_ratio <= 0.55:
+        if waiting_ratio <= 0.62:
             return 0.0
-        late_ramp = max(0.0, waiting_ratio - 0.80)
-        raw = (waiting_ratio - 0.55) * order.cancel_sensitivity * 0.70 + late_ramp * order.cancel_sensitivity * 1.30
-        return float(np.clip(raw, 0.0, 0.18))
+        mid_ramp = max(0.0, waiting_ratio - 0.62)
+        late_ramp = max(0.0, waiting_ratio - 0.86)
+        raw = mid_ramp * order.cancel_sensitivity * 0.42 + late_ramp * order.cancel_sensitivity * 1.85
+        return float(np.clip(raw, 0.0, 0.16))
 
     def _step_reward(self, result: StepResult) -> float:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(

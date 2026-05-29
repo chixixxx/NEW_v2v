@@ -125,7 +125,7 @@ class TLCManhattanScenarioGenerator:
             if fleet:
                 online_duration = int(rng.integers(150, 290) / self.env_config.tick_minutes)
             else:
-                online_duration = int(rng.integers(80, 190) / self.env_config.tick_minutes)
+                online_duration = int(rng.integers(70, 165) / self.env_config.tick_minutes)
             leave_tick = min(horizon, join_tick + online_duration)
             if leave_tick <= join_tick:
                 leave_tick = min(horizon, join_tick + 1)
@@ -157,13 +157,13 @@ class TLCManhattanScenarioGenerator:
 
     def _sample_wait_ticks(self, pressure: float, rng: np.random.Generator) -> int:
         if pressure >= 1.45:
-            minute_choices = np.array([6, 9, 12, 15])
-            probs = np.array([0.18, 0.28, 0.32, 0.22])
+            minute_choices = np.array([9, 12, 15, 18])
+            probs = np.array([0.18, 0.30, 0.32, 0.20])
         elif pressure <= 0.8:
-            minute_choices = np.array([24, 30, 36, 45, 54])
+            minute_choices = np.array([27, 36, 45, 54, 63])
             probs = np.array([0.18, 0.26, 0.26, 0.18, 0.12])
         else:
-            minute_choices = np.array([12, 18, 24, 30, 36])
+            minute_choices = np.array([15, 21, 27, 36, 45])
             probs = np.array([0.14, 0.22, 0.26, 0.22, 0.16])
         choices = np.maximum(1, np.ceil(minute_choices / self.env_config.tick_minutes).astype(int))
         return int(rng.choice(choices, p=probs / probs.sum()))

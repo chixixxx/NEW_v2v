@@ -77,8 +77,8 @@ python scripts/run_experiment.py --stage report --scale main
 - `main`：80 ticks + 14 buffer，约 4 小时 + 42 分钟，1600 单，1900 候选车，基础入池率 0.36，供给缩放 0.50。
 - 服务功率：`2.7 kWh/tick`，约等于 54 kW。
 - 每单候选车辆上限：20。
-- 每次 dispatch 固定成本：12.0。
-- top-batch 容量：活跃订单的 55%，并限制在 8 到 80 之间。
+- 每次 dispatch 固定成本：18.0。
+- top-batch 容量：活跃订单的 70%，并限制在 8 到 120 之间。
 
 ## 常调参数
 
@@ -123,6 +123,7 @@ configs/default.json
 - `mean_batch_interval_mean` 越接近 1，越像一步一匹配。
 - `timing_degenerate_risk=True` 表示策略可能退化为过于频繁匹配。
 - `environment_target_band=True` 表示服务率和过期/取消压力落在建议区间。
+- `dynamic_timing_ready=True` 表示策略分数差、batch interval 差异、fixed_2 服务率下降和 top-batch 可用性同时满足 stress benchmark 验收条件。
 
 ## 验证
 

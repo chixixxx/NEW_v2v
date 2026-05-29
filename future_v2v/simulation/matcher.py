@@ -116,10 +116,12 @@ class ConstrainedMatcher:
 
     def _adjusted_edge_value(self, edge: CandidateEdge, order: Order, tick: int) -> float:
         wait_ratio = order.waiting_ratio(tick)
-        pickup_penalty = 0.08 * edge.pickup_minutes
-        wait_risk_penalty = 2.5 * max(0.0, wait_ratio - 0.55)
-        urgency_bonus = 1.5 if order.is_urgent() or wait_ratio >= 0.75 else 0.0
-        return edge.expected_profit - pickup_penalty - wait_risk_penalty + urgency_bonus
+        pickup_penalty = 0.06 * edge.pickup_minutes
+        wait_risk_penalty = 1.4 * max(0.0, wait_ratio - 0.70)
+        urgency_bonus = 2.0 if order.is_urgent() else 0.0
+        deadline_bonus = 3.5 * max(0.0, wait_ratio - 0.68)
+        profit_bonus = 0.10 * max(0.0, edge.expected_profit - 10.0)
+        return edge.expected_profit + profit_bonus - pickup_penalty - wait_risk_penalty + urgency_bonus + deadline_bonus
 
     def realize_matches(
         self,

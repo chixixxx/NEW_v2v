@@ -34,3 +34,17 @@ def test_queue_threshold_uses_scale_aware_ratio() -> None:
     install_single_order_vehicle(env)
     policy = QueueThresholdPolicy(threshold_ratio=1.0, threshold_min=4)
     assert policy.act(env, env._observation()) == WAIT
+
+
+def test_tlc_wait_windows_convert_to_three_minute_ticks() -> None:
+    from future_v2v.simulation.tlc_generator import TLCManhattanScenarioGenerator
+
+    env = make_env()
+    rng = np.random.default_rng(7)
+    generator = TLCManhattanScenarioGenerator(env.env_config, env.scale_config, data=None)  # type: ignore[arg-type]
+    high_pressure = {generator._sample_wait_ticks(1.6, rng) for _ in range(100)}
+    normal_pressure = {generator._sample_wait_ticks(1.0, rng) for _ in range(100)}
+    low_pressure = {generator._sample_wait_ticks(0.6, rng) for _ in range(100)}
+    assert high_pressure <= {3, 4, 5, 6}
+    assert normal_pressure <= {5, 7, 9, 12, 15}
+    assert low_pressure <= {9, 12, 15, 18, 21}

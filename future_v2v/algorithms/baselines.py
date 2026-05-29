@@ -45,7 +45,7 @@ class QueueThresholdPolicy:
         configured_min = self.threshold_min if self.threshold_min is not None else env.env_config.queue_threshold_min
         scale_min = max(3, int(np.ceil(env.scale_config.total_orders * 0.10)))
         threshold_min = min(int(configured_min), scale_min)
-        expected_active = max(1.0, env.scale_config.total_orders / max(1, env.scale_config.horizon_ticks) * 8.0)
+        expected_active = max(1.0, env.scale_config.total_orders / max(1, env.scale_config.horizon_ticks) * 5.2)
         threshold = max(int(threshold_min), int(np.ceil(expected_active * threshold_ratio)))
         return self.match_action if len(env.snapshot().active_orders) >= threshold else WAIT
 
@@ -53,7 +53,7 @@ class QueueThresholdPolicy:
 @dataclass
 class DeadlineTriggerPolicy:
     slack_threshold: int = 1
-    full_match_wait_ratio: float = 0.92
+    full_match_wait_ratio: float = 0.98
 
     name: str = "deadline_trigger_top_batch"
 
@@ -67,17 +67,18 @@ class DeadlineTriggerPolicy:
             order for order in snapshot.active_orders
             if order.max_wait_ticks - order.waiting_ticks(env.current_tick) <= self.slack_threshold
         ]
-        if max(waiting_ratios) >= self.full_match_wait_ratio:
+        near_deadline_share = len(near_deadline) / max(1, len(snapshot.active_orders))
+        if max(waiting_ratios) >= self.full_match_wait_ratio or near_deadline_share >= 0.22:
             return MATCH_FULL
-        near_deadline_threshold = max(3, int(np.ceil(len(snapshot.active_orders) * 0.08)))
+        near_deadline_threshold = max(2, int(np.ceil(len(snapshot.active_orders) * 0.06)))
         return MATCH_TOP_BATCH if len(near_deadline) >= near_deadline_threshold else WAIT
 
 
 @dataclass
 class SupplyDemandPressurePolicy:
-    pressure_threshold: float = 0.65
-    min_orders: int = 18
-    min_mean_edge_profit: float = 7.0
+    pressure_threshold: float = 0.43
+    min_orders: int = 8
+    min_mean_edge_profit: float = 5.2
 
     name: str = "supply_demand_pressure_top_batch"
 
@@ -93,9 +94,9 @@ class SupplyDemandPressurePolicy:
         deadline_pressure = bool(waiting_ratios and max(waiting_ratios) >= 0.78)
         mean_profit = float(np.mean([edge.expected_profit for edge in snapshot.candidate_edges])) if snapshot.candidate_edges else 0.0
         edge_coverage = len({edge.order_id for edge in snapshot.candidate_edges}) / max(1, demand)
-        if deadline_pressure and pressure >= 0.55:
+        if deadline_pressure and pressure >= 0.58:
             return MATCH_FULL
-        if pressure >= self.pressure_threshold or (edge_coverage >= 0.75 and mean_profit >= self.min_mean_edge_profit):
+        if pressure >= self.pressure_threshold or (edge_coverage >= 0.55 and mean_profit >= self.min_mean_edge_profit):
             return MATCH_TOP_BATCH
         return WAIT
 

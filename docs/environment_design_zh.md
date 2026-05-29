@@ -40,15 +40,17 @@
 - 基础入池率 0.36。
 - `supply_scale=0.50`。
 - 每单候选车辆上限 20。
-- `dispatch_fixed_cost=12.0`。
-- `dispatch_capacity_ratio=0.55`，`dispatch_capacity_min=8`，`dispatch_capacity_max=80`。
-- `wait_penalty_per_order_tick=0.015`。
+- `dispatch_fixed_cost=18.0`。
+- `dispatch_capacity_ratio=0.70`，`dispatch_capacity_min=8`，`dispatch_capacity_max=120`。
+- `wait_penalty_per_order_tick=0.008`。
 
 健康目标：
 
 - `service_rate` 约 65%-82%。
 - `expired + cancelled` 约 8%-22%。
 - 优良策略 `mean_batch_interval` 应落在约 1.3-2.2 ticks。
+- `top_batch_viability` 目标不低于 0.95。
+- `policy_spread_score` 目标高于 150。
 - `fixed_1_tick_full_match` 不应稳定压倒所有策略。
 - `fixed_2_tick_full_match` 不应因为等待曲线过陡而直接崩盘。
 

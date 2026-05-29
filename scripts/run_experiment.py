@@ -229,6 +229,21 @@ def _timing_policy_comparison(
     dispatch_by_policy: dict[str, list[dict[str, object]]] = {}
     for row in dispatch_rows:
         dispatch_by_policy.setdefault(str(row["policy_name"]), []).append(row)
+    summary_by_policy = {str(row["policy_name"]): row for row in summary_rows}
+    fixed_1 = summary_by_policy.get("fixed_1_tick_full_match")
+    fixed_2 = summary_by_policy.get("fixed_2_tick_full_match")
+    fixed_1_top = summary_by_policy.get("fixed_1_tick_top_batch")
+    best_score = max((float(row["future_v2v_score_mean"]) for row in summary_rows), default=0.0)
+    intervals = [float(row["mean_batch_interval_mean"]) for row in summary_rows]
+    fixed_1_score = float(fixed_1["future_v2v_score_mean"]) if fixed_1 else 0.0
+    fixed_1_profit = float(fixed_1["platform_profit_mean"]) if fixed_1 else 0.0
+    fixed_1_service = float(fixed_1["service_rate_mean"]) if fixed_1 else 0.0
+    fixed_2_service = float(fixed_2["service_rate_mean"]) if fixed_2 else 0.0
+    fixed_1_top_score = float(fixed_1_top["future_v2v_score_mean"]) if fixed_1_top else 0.0
+    policy_spread_score = best_score - fixed_1_score
+    batch_interval_spread = max(intervals, default=0.0) - min(intervals, default=0.0)
+    top_batch_viability = fixed_1_top_score / fixed_1_score if fixed_1_score > 0 else 0.0
+    service_drop_fixed2_vs_fixed1 = fixed_1_service - fixed_2_service
     comparison = []
     for row in summary_rows:
         policy_name = str(row["policy_name"])
@@ -248,6 +263,17 @@ def _timing_policy_comparison(
                 "mean_profit_per_dispatch": sum(profit_values) / max(1, len(profit_values)),
                 "mean_accepted_per_dispatch": sum(accepted_values) / max(1, len(accepted_values)),
                 "timing_degeneracy": bool(float(row["mean_batch_interval_mean"]) <= 1.15),
+                "policy_spread_score": policy_spread_score,
+                "batch_interval_spread": batch_interval_spread,
+                "top_batch_viability": top_batch_viability,
+                "service_drop_fixed2_vs_fixed1": service_drop_fixed2_vs_fixed1,
+                "full_match_cost_gap": float(row["platform_profit_mean"]) - fixed_1_profit,
+                "dynamic_timing_ready": bool(
+                    policy_spread_score > 150.0
+                    and batch_interval_spread >= 0.8
+                    and service_drop_fixed2_vs_fixed1 <= 0.10
+                    and top_batch_viability >= 0.95
+                ),
             }
         )
     return comparison

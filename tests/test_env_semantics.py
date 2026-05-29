@@ -117,3 +117,16 @@ def test_action_traces_record_wait_and_dispatch() -> None:
     assert env.wait_tradeoff_trace
     env.step(MATCH_FULL)
     assert env.dispatch_trace[-1]["dispatch_mode"] == "match_full"
+
+
+def test_cancel_probability_is_flat_mid_wait_and_steeper_near_deadline() -> None:
+    env = make_env()
+    install_single_order_vehicle(env, max_wait_ticks=10)
+    env.orders[0].cancel_sensitivity = 0.30
+    env.current_tick = 5
+    assert env._cancel_probability(env.orders[0]) == 0.0
+    env.current_tick = 7
+    mid = env._cancel_probability(env.orders[0])
+    env.current_tick = 10
+    late = env._cancel_probability(env.orders[0])
+    assert 0.0 < mid < late
