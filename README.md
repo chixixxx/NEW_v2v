@@ -1,15 +1,17 @@
 # Future V2V Adaptive Timing
 
-独立的新研究工程：强化学习决定 V2V 平台何时触发批量匹配，约束优化器决定订单与车辆如何匹配。
+独立研究工程：强化学习决定 V2V 平台何时触发批量匹配，约束优化器决定订单与车辆如何匹配。
 
-默认主环境使用 NYC TLC 黄出租数据改造出的 Manhattan taxi-zone 级 Future V2V 场景。黄出租数据只提供真实时空需求、OD 热点、行程时间和价格强度；V2V 的电量、等待窗口、报价、保留电量和车辆供给仍由业务模型生成。
+默认主环境使用 NYC TLC 黄出租数据改造出的 Manhattan taxi-zone 级 Future V2V 场景。黄出租数据只提供真实时空需求、OD 热点、行程时间和价格强度；V2V 的电量、等待窗口、报价、保留电量、SOC、电池健康和车辆供给仍由业务模型生成。
 
-当前默认：
+当前主线：
 
 - 1 tick = 3 分钟。
-- `main`：4 小时决策窗口 + 42 分钟 terminal buffer。
-- `smoke`：3 小时决策窗口 + 24 分钟 terminal buffer。
+- 动作空间：`WAIT / MATCH_TOP_BATCH / MATCH_FULL`。
+- `main`：约 4 小时决策窗口 + 42 分钟 terminal buffer。
+- `smoke`：约 3 小时决策窗口 + 24 分钟 terminal buffer。
 - DQN 训练支持并行 rollout workers。
+- 电池健康与双边价格机制默认开启：传输效率、最低 SOC、安全可供电量、退化成本、卖方补偿和平台边际收益都会进入匹配约束与评估指标。
 
 准备 TLC Manhattan 缓存：
 
@@ -36,7 +38,7 @@ python -m pytest tests -q
 python -m ruff check future_v2v scripts tests
 ```
 
-更多说明见：
+更多说明：
 
 - `docs/research_design_zh.md`
 - `docs/environment_design_zh.md`

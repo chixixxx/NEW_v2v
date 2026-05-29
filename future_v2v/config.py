@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,14 @@ class ExperimentConfig:
     minutes_per_tick: int
     output_root: str
     run_name_template: str
+
+
+@dataclass(frozen=True)
+class BatteryHealthConfig:
+    donor_min_soc_ratio: float = 0.25
+    transfer_efficiency: float = 0.90
+    degradation_cost_per_kwh: float = 0.08
+    max_discharge_power_kw: float = 50.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +61,7 @@ class EnvironmentConfig:
     max_candidate_vehicles_per_order: int = 64
     train_days: list[str] | None = None
     eval_days: list[str] | None = None
+    battery_health: BatteryHealthConfig = field(default_factory=BatteryHealthConfig)
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,7 @@ def load_project_config(path: str | Path = "configs/default.json") -> ProjectCon
         raw = json.load(f)
     env_raw = dict(raw["environment"])
     env_raw.setdefault("tick_minutes", raw["experiment"]["minutes_per_tick"])
+    env_raw["battery_health"] = BatteryHealthConfig(**dict(env_raw.get("battery_health", {})))
     if int(env_raw["tick_minutes"]) != int(raw["experiment"]["minutes_per_tick"]):
         raise ValueError("environment.tick_minutes must match experiment.minutes_per_tick")
     scales = {

@@ -54,7 +54,7 @@ python scripts/run_experiment.py --stage all --scale main --rollout-workers 4 --
 分阶段：
 
 ```bash
-python scripts/run_experiment.py --stage generate --scale main --eval-episodes 3
+python scripts/run_experiment.py --stage generate --scale main --eval-episodes 8
 python scripts/run_experiment.py --stage train --scale main --rollout-workers 4
 python scripts/run_experiment.py --stage eval --scale main --eval-workers 4
 python scripts/run_experiment.py --stage report --scale main
@@ -62,68 +62,63 @@ python scripts/run_experiment.py --stage report --scale main
 
 ## 阶段含义
 
-- `generate`：生成环境健康报告，检查供需比、活跃订单/车辆和可行边密度。
-- `train`：训练 DQN timing policy，RL 学习 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`，匹配边由约束优化器决定。
+- `generate`：生成固定评估 manifest 和环境健康报告，检查供需比、活跃订单/车辆、可行边密度、健康可供电量和 SOC 安全线绑定率。
+- `train`：训练 DQN timing policy。RL 学习 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`，匹配边由约束优化器决定。
 - `eval`：评估 DQN 与 fixed interval、queue threshold、deadline trigger、supply-demand pressure、short lookahead 等策略。
 - `report`：汇总环境、训练和评估报告。
 - `all`：顺序执行 `generate -> train -> eval -> report`。
 
 ## 默认规模
 
-当前配置：
-
-- tick：3 分钟。
-- `smoke`：60 ticks + 8 buffer，约 3 小时 + 24 分钟，80 单，120 候选车。
-- `main`：80 ticks + 14 buffer，约 4 小时 + 42 分钟，1600 单，1900 候选车，基础入池率 0.36，供给缩放 0.50。
-- 服务功率：`2.7 kWh/tick`，约等于 54 kW。
+- `smoke`：60 ticks + 8 buffer，80 单，120 候选车。
+- `main`：80 ticks + 14 buffer，1600 单，1900 候选车，基础入池率 0.36，供给缩放 0.50。
 - 每单候选车辆上限：20。
 - 每次 dispatch 固定成本：18.0。
 - top-batch 容量：活跃订单的 70%，并限制在 8 到 120 之间。
 
-## 常调参数
+## 电池健康与价格参数
 
-集中修改：
+集中配置在 `configs/default.json`：
 
 ```text
-configs/default.json
+environment.battery_health.donor_min_soc_ratio
+environment.battery_health.transfer_efficiency
+environment.battery_health.degradation_cost_per_kwh
+environment.battery_health.max_discharge_power_kw
 ```
 
-常用参数：
+默认：
 
-- `environment.dispatch_fixed_cost`
-- `environment.dispatch_capacity_ratio`
-- `environment.queue_threshold_ratio`
-- `environment.wait_penalty_per_order_tick`
-- `environment.supply_scale`
-- `environment.max_candidate_vehicles_per_order`
-- `scales.main.total_orders`
-- `scales.main.candidate_vehicles`
-- `scales.main.vehicle_join_probability`
-- `training.rollout_workers`
-- `training.validation_episodes`
+```text
+donor_min_soc_ratio = 0.25
+transfer_efficiency = 0.90
+degradation_cost_per_kwh = 0.08
+max_discharge_power_kw = 50.0
+```
+
+订单 `demand_kwh` 是 CV 实际获得的有效电量。DV 输出电量、传输损耗、卖方补偿、退化成本和平台边际收益会在 dispatch trace 和 eval summary 中单独输出。
 
 ## 结果解读
 
 优先看：
 
 - `outputs/<run_name>/env_health/env_health_summary.csv`
-- `outputs/<run_name>/train/train_history.csv`
-- `outputs/<run_name>/train/validation_history.csv`
-- `outputs/<run_name>/train/action_distribution.csv`
 - `outputs/<run_name>/eval/eval_summary.csv`
 - `outputs/<run_name>/eval/timing_policy_comparison.csv`
-- `outputs/<run_name>/eval/action_trace_by_policy.csv`
 - `outputs/<run_name>/eval/dispatch_trace_by_policy.csv`
 - `outputs/<run_name>/eval/wait_tradeoff_trace.csv`
-- `outputs/<run_name>/reports/run_report.md`
 
-`eval_summary.csv` 中：
+关键指标：
 
-- `future_v2v_score_mean` 是主排序指标。
-- `mean_batch_interval_mean` 越接近 1，越像一步一匹配。
-- `timing_degenerate_risk=True` 表示策略可能退化为过于频繁匹配。
-- `environment_target_band=True` 表示服务率和过期/取消压力落在建议区间。
-- `dynamic_timing_ready=True` 表示策略分数差、batch interval 差异、fixed_2 服务率下降和 top-batch 可用性同时满足 stress benchmark 验收条件。
+- `future_v2v_score_mean`：主排序指标。
+- `platform_profit_mean`：扣除 dispatch 固定成本后的平台利润。
+- `platform_margin_per_served_order`：不含 dispatch 固定成本的单服务边际收益。
+- `energy_loss_rate`：V2V 传输损耗率，默认应约 10%。
+- `seller_compensation_share`：卖方补偿占买方支付比例。
+- `donor_soc_violation_count_mean`：必须为 0。
+- `battery_health_rejection_count_mean`：电池健康约束造成的候选拒绝规模。
+- `mean_batch_interval_mean`：越接近 1，越像一步一匹配。
+- `dynamic_timing_ready`：策略差异、batch interval、fixed_2 服务率下降和 top-batch 可用性是否同时满足 stress benchmark 条件。
 
 ## 验证
 

@@ -92,7 +92,7 @@ class ScenarioGenerator:
             capacity = float(rng.choice([55.0, 65.0, 75.0, 90.0, 105.0]))
             soc_ratio = self._sample_soc_ratio(rng, fleet=fleet)
             reserve = float(rng.uniform(10.0, 22.0))
-            reservation_price = self._sample_reservation_price(rng, fleet=fleet)
+            energy_cost, service_premium = self._sample_price_components(rng, fleet=fleet)
             time_cost = float(np.clip(rng.normal(0.055 if fleet else 0.075, 0.018), 0.02, 0.13))
             accept_sensitivity = float(np.clip(rng.normal(0.75 if fleet else 0.95, 0.12), 0.45, 1.35))
             current_zone = int(rng.integers(0, self.env_config.zone_count))
@@ -107,7 +107,8 @@ class ScenarioGenerator:
                     battery_capacity_kwh=capacity,
                     current_soc_kwh=capacity * soc_ratio,
                     reserve_kwh=reserve,
-                    reservation_price_per_kwh=reservation_price,
+                    energy_cost_per_kwh=energy_cost,
+                    service_premium_per_kwh=service_premium,
                     time_cost_per_min=time_cost,
                     owner_accept_sensitivity=accept_sensitivity,
                     fleet_flag=fleet,
@@ -127,7 +128,7 @@ class ScenarioGenerator:
         return float(np.clip(0.38 + 0.50 * raw, 0.42, 0.84))
 
     @staticmethod
-    def _sample_reservation_price(rng: np.random.Generator, *, fleet: bool) -> float:
+    def _sample_price_components(rng: np.random.Generator, *, fleet: bool) -> tuple[float, float]:
         energy_cost = float(np.clip(rng.lognormal(mean=np.log(0.22 if fleet else 0.28), sigma=0.18), 0.12, 0.55))
-        service_premium = float(np.clip(rng.lognormal(mean=np.log(1.85 if fleet else 2.35), sigma=0.22), 1.0, 4.2))
-        return float(np.clip(energy_cost + service_premium, 1.35, 4.75))
+        service_premium = float(np.clip(rng.lognormal(mean=np.log(1.75 if fleet else 2.25), sigma=0.22), 1.0, 4.2))
+        return energy_cost, service_premium

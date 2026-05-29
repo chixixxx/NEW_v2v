@@ -64,7 +64,8 @@ def test_top_batch_respects_capacity() -> None:
             battery_capacity_kwh=80.0,
             current_soc_kwh=60.0,
             reserve_kwh=15.0,
-            reservation_price_per_kwh=2.0,
+            energy_cost_per_kwh=0.25,
+            service_premium_per_kwh=1.75,
             time_cost_per_min=0.0,
             owner_accept_sensitivity=0.5,
             fleet_flag=False,
@@ -84,3 +85,28 @@ def test_full_match_keeps_all_profitable_assignment_matches() -> None:
     assert [(edge.order_id, edge.vehicle_id) for edge in full.matches] == [
         (edge.order_id, edge.vehicle_id) for edge in legacy.matches
     ]
+
+
+def test_matcher_uses_transfer_efficiency_and_price_components() -> None:
+    env = make_env()
+    install_single_order_vehicle(env)
+    edge = env.matcher.score_edge(env.orders[0], env.vehicles[0], tick=0)
+    assert edge.feasible
+    assert edge.delivered_kwh == env.orders[0].demand_kwh
+    assert round(edge.donor_output_kwh, 6) == round(env.orders[0].demand_kwh / env.env_config.battery_health.transfer_efficiency, 6)
+    assert edge.energy_loss_kwh > 0.0
+    assert edge.seller_energy_cost > 0.0
+    assert edge.seller_degradation_cost > 0.0
+    assert edge.seller_service_premium > 0.0
+    assert edge.seller_reimbursement == edge.seller_energy_cost + edge.seller_degradation_cost + edge.seller_service_premium
+
+
+def test_matcher_respects_health_soc_floor() -> None:
+    env = make_env()
+    install_single_order_vehicle(env)
+    vehicle = env.vehicles[0]
+    vehicle.reserve_kwh = 5.0
+    vehicle.current_soc_kwh = vehicle.battery_capacity_kwh * env.env_config.battery_health.donor_min_soc_ratio + 4.0
+    edge = env.matcher.score_edge(env.orders[0], vehicle, tick=0)
+    assert not edge.feasible
+    assert edge.reason == "energy_shortage"

@@ -350,9 +350,15 @@ def _timing_policy_comparison(
     fixed_1_service = float(fixed_1["service_rate_mean"]) if fixed_1 else 0.0
     fixed_2_service = float(fixed_2["service_rate_mean"]) if fixed_2 else 0.0
     fixed_1_top_score = float(fixed_1_top["future_v2v_score_mean"]) if fixed_1_top else 0.0
+    energy_loss_rate = float(fixed_1["energy_loss_rate"]) if fixed_1 else 0.0
+    seller_compensation_share = float(fixed_1["seller_compensation_share"]) if fixed_1 else 0.0
     policy_spread_score = best_score - fixed_1_score
     batch_interval_spread = max(intervals, default=0.0) - min(intervals, default=0.0)
-    top_batch_viability = fixed_1_top_score / fixed_1_score if fixed_1_score > 0 else 0.0
+    top_batch_viability = 1.0 - abs(fixed_1_top_score - fixed_1_score) / max(
+        1.0,
+        abs(fixed_1_score),
+        abs(fixed_1_top_score),
+    )
     service_drop_fixed2_vs_fixed1 = fixed_1_service - fixed_2_service
     comparison = []
     for row in summary_rows:
@@ -378,6 +384,11 @@ def _timing_policy_comparison(
                 "top_batch_viability": top_batch_viability,
                 "service_drop_fixed2_vs_fixed1": service_drop_fixed2_vs_fixed1,
                 "full_match_cost_gap": float(row["platform_profit_mean"]) - fixed_1_profit,
+                "energy_loss_rate": row.get("energy_loss_rate", energy_loss_rate),
+                "seller_compensation_share": row.get("seller_compensation_share", seller_compensation_share),
+                "platform_margin_per_served_order": row.get("platform_margin_per_served_order", 0.0),
+                "donor_soc_violation_count_mean": row.get("donor_soc_violation_count_mean", 0.0),
+                "battery_health_rejection_count_mean": row.get("battery_health_rejection_count_mean", 0.0),
                 "dynamic_timing_ready": bool(
                     policy_spread_score > 150.0
                     and batch_interval_spread >= 0.8

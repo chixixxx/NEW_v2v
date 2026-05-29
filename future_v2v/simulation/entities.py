@@ -29,6 +29,17 @@ class Order:
     pickup_minutes: float = 0.0
     commitment_ticks: float = 0.0
     realized_profit: float = 0.0
+    buyer_payment: float = 0.0
+    seller_reimbursement: float = 0.0
+    seller_energy_cost: float = 0.0
+    seller_degradation_cost: float = 0.0
+    seller_service_premium: float = 0.0
+    platform_pickup_cost: float = 0.0
+    seller_time_cost: float = 0.0
+    delivered_kwh: float = 0.0
+    donor_output_kwh: float = 0.0
+    energy_loss_kwh: float = 0.0
+    donor_soc_after_kwh: float = 0.0
 
     def is_active(self, tick: int) -> bool:
         return self.status == ORDER_PENDING and self.arrival_tick <= tick
@@ -53,7 +64,8 @@ class Vehicle:
     battery_capacity_kwh: float
     current_soc_kwh: float
     reserve_kwh: float
-    reservation_price_per_kwh: float
+    energy_cost_per_kwh: float
+    service_premium_per_kwh: float
     time_cost_per_min: float
     owner_accept_sensitivity: float
     fleet_flag: bool
@@ -61,9 +73,25 @@ class Vehicle:
     busy_until_tick: float = 0.0
     served_count: int = 0
     supplied_kwh: float = 0.0
+    delivered_kwh: float = 0.0
+    energy_loss_kwh: float = 0.0
+    seller_reimbursement: float = 0.0
+    seller_energy_cost: float = 0.0
+    seller_degradation_cost: float = 0.0
+    seller_service_premium: float = 0.0
+
+    @property
+    def reservation_price_per_kwh(self) -> float:
+        return self.energy_cost_per_kwh + self.service_premium_per_kwh
 
     def available_energy_kwh(self) -> float:
         return max(0.0, self.current_soc_kwh - self.reserve_kwh)
+
+    def health_floor_kwh(self, donor_min_soc_ratio: float) -> float:
+        return max(self.reserve_kwh, donor_min_soc_ratio * self.battery_capacity_kwh)
+
+    def available_energy_with_health_kwh(self, donor_min_soc_ratio: float) -> float:
+        return max(0.0, self.current_soc_kwh - self.health_floor_kwh(donor_min_soc_ratio))
 
     def is_joined(self, tick: int) -> bool:
         return self.join_tick <= tick < self.leave_tick
@@ -90,14 +118,34 @@ class CandidateEdge:
     pickup_minutes: float
     service_ticks: float
     total_commitment_ticks: float
-    revenue: float
-    seller_compensation: float
-    platform_cost: float
+    delivered_kwh: float
+    donor_output_kwh: float
+    energy_loss_kwh: float
+    buyer_payment: float
+    seller_reimbursement: float
+    seller_energy_cost: float
+    seller_degradation_cost: float
+    seller_service_premium: float
+    platform_pickup_cost: float
+    seller_time_cost: float
     immediate_profit: float
     accept_probability: float
     expected_profit: float
     feasible: bool
+    donor_soc_after_kwh: float
     reason: str = "feasible"
+
+    @property
+    def revenue(self) -> float:
+        return self.buyer_payment
+
+    @property
+    def seller_compensation(self) -> float:
+        return self.seller_reimbursement
+
+    @property
+    def platform_cost(self) -> float:
+        return self.platform_pickup_cost
 
 
 @dataclass(frozen=True)
@@ -109,6 +157,17 @@ class Match:
     pickup_minutes: float
     total_commitment_ticks: float
     accepted: bool
+    delivered_kwh: float = 0.0
+    donor_output_kwh: float = 0.0
+    energy_loss_kwh: float = 0.0
+    buyer_payment: float = 0.0
+    seller_reimbursement: float = 0.0
+    seller_energy_cost: float = 0.0
+    seller_degradation_cost: float = 0.0
+    seller_service_premium: float = 0.0
+    platform_pickup_cost: float = 0.0
+    seller_time_cost: float = 0.0
+    donor_soc_after_kwh: float = 0.0
 
 
 @dataclass
@@ -125,3 +184,15 @@ class StepResult:
     candidate_edge_count: int = 0
     mean_pickup_minutes: float = 0.0
     mean_commitment_ticks: float = 0.0
+    buyer_payment: float = 0.0
+    seller_reimbursement: float = 0.0
+    seller_energy_cost: float = 0.0
+    seller_degradation_cost: float = 0.0
+    seller_service_premium: float = 0.0
+    platform_pickup_cost: float = 0.0
+    seller_time_cost: float = 0.0
+    delivered_kwh: float = 0.0
+    donor_output_kwh: float = 0.0
+    energy_loss_kwh: float = 0.0
+    mean_donor_soc_after_kwh: float = 0.0
+    battery_health_rejection_count: int = 0

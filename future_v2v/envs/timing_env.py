@@ -54,6 +54,10 @@ OBSERVATION_NAMES = (
     "mean_candidate_profit",
     "urgent_feasible_coverage",
     "energy_feasible_coverage",
+    "mean_available_energy_with_health",
+    "soc_safety_binding_rate",
+    "mean_candidate_platform_margin",
+    "energy_loss_rate_estimate",
 )
 
 
@@ -177,10 +181,25 @@ class FutureV2VTimingEnv:
             result.rejected_count = len(realized) - len(accepted)
             result.dispatch_capacity = int(capacity)
             result.candidate_edge_count = len(plan.edges)
+            result.battery_health_rejection_count = sum(
+                int(plan.rejected_reason_counts.get(reason, 0))
+                for reason in ("energy_shortage", "battery_health_floor", "discharge_power_cap")
+            )
             result.platform_profit = float(sum(match.realized_profit for match in accepted) - self.env_config.dispatch_fixed_cost)
             if accepted:
                 result.mean_pickup_minutes = float(np.mean([match.pickup_minutes for match in accepted]))
                 result.mean_commitment_ticks = float(np.mean([match.total_commitment_ticks for match in accepted]))
+                result.buyer_payment = float(sum(match.buyer_payment for match in accepted))
+                result.seller_reimbursement = float(sum(match.seller_reimbursement for match in accepted))
+                result.seller_energy_cost = float(sum(match.seller_energy_cost for match in accepted))
+                result.seller_degradation_cost = float(sum(match.seller_degradation_cost for match in accepted))
+                result.seller_service_premium = float(sum(match.seller_service_premium for match in accepted))
+                result.platform_pickup_cost = float(sum(match.platform_pickup_cost for match in accepted))
+                result.seller_time_cost = float(sum(match.seller_time_cost for match in accepted))
+                result.delivered_kwh = float(sum(match.delivered_kwh for match in accepted))
+                result.donor_output_kwh = float(sum(match.donor_output_kwh for match in accepted))
+                result.energy_loss_kwh = float(sum(match.energy_loss_kwh for match in accepted))
+                result.mean_donor_soc_after_kwh = float(np.mean([match.donor_soc_after_kwh for match in accepted]))
             self.rejected_matches += result.rejected_count
             self.platform_profit += result.platform_profit
             self.dispatch_ticks.append(self.current_tick)
@@ -225,7 +244,40 @@ class FutureV2VTimingEnv:
         fleet = [vehicle for vehicle in self.vehicles if vehicle.fleet_flag]
         private = [vehicle for vehicle in self.vehicles if not vehicle.fleet_flag]
         used_energy = sum(vehicle.supplied_kwh for vehicle in self.vehicles)
-        initial_available_energy = sum(max(0.0, vehicle.battery_capacity_kwh * 0.88 - vehicle.reserve_kwh) for vehicle in self.vehicles)
+        battery = self.env_config.battery_health
+        initial_available_energy = sum(
+            max(
+                0.0,
+                vehicle.battery_capacity_kwh * 0.88
+                - max(vehicle.reserve_kwh, battery.donor_min_soc_ratio * vehicle.battery_capacity_kwh),
+            )
+            for vehicle in self.vehicles
+        )
+        delivered_kwh = sum(order.delivered_kwh for order in served)
+        donor_output_kwh = sum(order.donor_output_kwh for order in served)
+        energy_loss_kwh = sum(order.energy_loss_kwh for order in served)
+        buyer_payment = sum(order.buyer_payment for order in served)
+        seller_reimbursement = sum(order.seller_reimbursement for order in served)
+        seller_energy_cost = sum(order.seller_energy_cost for order in served)
+        seller_degradation_cost = sum(order.seller_degradation_cost for order in served)
+        seller_service_premium = sum(order.seller_service_premium for order in served)
+        platform_pickup_cost = sum(order.platform_pickup_cost for order in served)
+        seller_time_cost = sum(order.seller_time_cost for order in served)
+        donor_soc_after_values = [order.donor_soc_after_kwh for order in served if order.donor_soc_after_kwh > 0.0]
+        floor_by_vehicle = {
+            vehicle.vehicle_id: vehicle.health_floor_kwh(battery.donor_min_soc_ratio)
+            for vehicle in self.vehicles
+        }
+        donor_soc_violation_count = sum(
+            1
+            for order in served
+            if order.matched_vehicle_id is not None
+            and order.donor_soc_after_kwh + 1e-9 < floor_by_vehicle.get(order.matched_vehicle_id, 0.0)
+        )
+        battery_health_rejection_count = sum(
+            int(row.get("battery_health_rejection_count", 0))
+            for row in self.dispatch_trace
+        )
         service_rate = len(served) / max(1, len(self.orders))
         urgent_service_rate = len(urgent_served) / max(1, len(urgent))
         expired_rate = len(expired) / max(1, len(self.orders))
@@ -270,6 +322,20 @@ class FutureV2VTimingEnv:
             fleet_utilization=self._vehicle_utilization(fleet),
             private_utilization=self._vehicle_utilization(private),
             energy_utilization=used_energy / max(1.0, initial_available_energy),
+            unmet_kwh=sum(order.demand_kwh for order in self.orders if order.status != ORDER_MATCHED),
+            delivered_kwh=delivered_kwh,
+            donor_output_kwh=donor_output_kwh,
+            energy_loss_kwh=energy_loss_kwh,
+            buyer_payment=buyer_payment,
+            seller_reimbursement=seller_reimbursement,
+            seller_energy_cost=seller_energy_cost,
+            seller_degradation_cost=seller_degradation_cost,
+            seller_service_premium=seller_service_premium,
+            platform_margin=buyer_payment - seller_reimbursement - platform_pickup_cost - seller_time_cost,
+            mean_donor_soc_after=float(np.mean(donor_soc_after_values)) if donor_soc_after_values else 0.0,
+            min_donor_soc_after=float(np.min(donor_soc_after_values)) if donor_soc_after_values else 0.0,
+            donor_soc_violation_count=donor_soc_violation_count,
+            battery_health_rejection_count=battery_health_rejection_count,
             scenario_id=self.scenario_id,
             scenario_day=self.scenario_day,
             scenario_start_tick_day=self.scenario_start_tick_day,
@@ -304,14 +370,40 @@ class FutureV2VTimingEnv:
     def _env_health_current_scenario(self, seed: int) -> dict[str, float | int]:
         supply_demand_ratios = []
         feasible_densities = []
+        health_feasible_density = []
+        health_feasible_densities = []
+        available_energy_with_health = []
+        soc_binding_rates = []
         active_orders = []
         active_vehicles = []
         for _tick in range(self.scale_config.horizon_ticks):
             snapshot = self.snapshot()
             order_count = len(snapshot.active_orders)
             vehicle_count = len(snapshot.active_vehicles)
+            all_edges = self.matcher.build_edges(
+                snapshot.active_orders,
+                snapshot.active_vehicles,
+                self.current_tick,
+                include_infeasible=True,
+            )
             supply_demand_ratios.append(vehicle_count / max(1, order_count))
             feasible_densities.append(len(snapshot.candidate_edges) / max(1, order_count * max(1, vehicle_count)))
+            health_feasible_density.append(len(snapshot.candidate_edges) / max(1, order_count * max(1, vehicle_count)))
+            health_feasible_densities.append(len(snapshot.candidate_edges) / max(1, len(all_edges)))
+            available_energy_with_health.append(
+                sum(
+                    vehicle.available_energy_with_health_kwh(self.env_config.battery_health.donor_min_soc_ratio)
+                    for vehicle in snapshot.active_vehicles
+                )
+            )
+            soc_binding_rates.append(
+                sum(
+                    1
+                    for vehicle in snapshot.active_vehicles
+                    if vehicle.health_floor_kwh(self.env_config.battery_health.donor_min_soc_ratio) > vehicle.reserve_kwh
+                )
+                / max(1, vehicle_count)
+            )
             active_orders.append(order_count)
             active_vehicles.append(vehicle_count)
             self.current_tick += 1
@@ -322,6 +414,11 @@ class FutureV2VTimingEnv:
             "mean_active_vehicles": float(np.mean(active_vehicles)),
             "mean_supply_demand_ratio": float(np.mean(supply_demand_ratios)),
             "mean_feasible_edge_density": float(np.mean(feasible_densities)),
+            "health_feasible_edge_density": float(np.mean(health_feasible_density)),
+            "health_feasible_edge_share": float(np.mean(health_feasible_densities)),
+            "mean_available_energy_with_health": float(np.mean(available_energy_with_health)),
+            "soc_safety_binding_rate": float(np.mean(soc_binding_rates)),
+            "energy_loss_rate_estimate": 1.0 - self.env_config.battery_health.transfer_efficiency,
             "min_supply_demand_ratio": float(np.min(supply_demand_ratios)),
             "max_active_orders": int(np.max(active_orders)),
             "max_active_vehicles": int(np.max(active_vehicles)),
@@ -336,6 +433,10 @@ class FutureV2VTimingEnv:
         vehicle_count = len(active_vehicles)
         total_demand = sum(order.demand_kwh for order in active_orders)
         total_energy = sum(vehicle.available_energy_kwh() for vehicle in active_vehicles)
+        total_health_energy = sum(
+            vehicle.available_energy_with_health_kwh(self.env_config.battery_health.donor_min_soc_ratio)
+            for vehicle in active_vehicles
+        )
         waiting_ratios = [order.waiting_ratio(self.current_tick) for order in active_orders]
         near_deadline = sum(1 for order in active_orders if order.max_wait_ticks - order.waiting_ticks(self.current_tick) <= 1)
         cancel_risk = [self._cancel_probability(order) for order in active_orders]
@@ -345,6 +446,7 @@ class FutureV2VTimingEnv:
         vehicle_zones = [vehicle.current_zone for vehicle in active_vehicles]
         shortage = self.network.shortage_pressure_by_zone(order_zones, vehicle_zones)
         profits = [edge.expected_profit for edge in edges]
+        margins = [edge.immediate_profit for edge in edges]
         pickups = [edge.pickup_minutes for edge in edges]
         urgent_orders = [order.order_id for order in active_orders if order.is_urgent()]
         urgent_covered = {edge.order_id for edge in edges if edge.order_id in urgent_orders}
@@ -372,6 +474,16 @@ class FutureV2VTimingEnv:
                 (float(np.mean(profits)) / 30.0) if profits else 0.0,
                 len(urgent_covered) / max(1, len(urgent_orders)),
                 len(energy_covered) / max(1, order_count),
+                (total_health_energy / max(1.0, vehicle_count)) / 80.0,
+                sum(
+                    1
+                    for vehicle in active_vehicles
+                    if vehicle.health_floor_kwh(self.env_config.battery_health.donor_min_soc_ratio) > vehicle.reserve_kwh
+                )
+                / max(1, vehicle_count),
+                (float(np.mean(margins)) / 30.0) if margins else 0.0,
+                (sum(edge.energy_loss_kwh for edge in edges) / max(1e-9, sum(edge.donor_output_kwh for edge in edges)))
+                if edges else 0.0,
             ],
             dtype=np.float32,
         )
@@ -451,6 +563,11 @@ class FutureV2VTimingEnv:
             "accepted_count": result.accepted_count,
             "expired_count": result.expired_count,
             "cancelled_count": result.cancelled_count,
+            "buyer_payment": result.buyer_payment,
+            "seller_reimbursement": result.seller_reimbursement,
+            "energy_loss_kwh": result.energy_loss_kwh,
+            "mean_donor_soc_after_kwh": result.mean_donor_soc_after_kwh,
+            "battery_health_rejection_count": result.battery_health_rejection_count,
         }
         for idx in range(ACTION_COUNT):
             row[f"q_action_{idx}"] = "" if q_values is None or idx >= len(q_values) else float(q_values[idx])
@@ -470,6 +587,16 @@ class FutureV2VTimingEnv:
                 "accepted_count": result.accepted_count,
                 "rejected_count": result.rejected_count,
                 "platform_profit": result.platform_profit,
+                "buyer_payment": result.buyer_payment,
+                "seller_reimbursement": result.seller_reimbursement,
+                "seller_energy_cost": result.seller_energy_cost,
+                "seller_degradation_cost": result.seller_degradation_cost,
+                "seller_service_premium": result.seller_service_premium,
+                "delivered_kwh": result.delivered_kwh,
+                "donor_output_kwh": result.donor_output_kwh,
+                "energy_loss_kwh": result.energy_loss_kwh,
+                "mean_donor_soc_after_kwh": result.mean_donor_soc_after_kwh,
+                "battery_health_rejection_count": result.battery_health_rejection_count,
                 "profit_per_dispatch": profit_per_dispatch,
                 "profit_per_accepted_order": profit_per_accepted,
                 "mean_pickup_minutes": result.mean_pickup_minutes,
@@ -503,6 +630,8 @@ class FutureV2VTimingEnv:
                 "candidate_profit_delta": sum(edge.expected_profit for edge in after_snapshot.candidate_edges)
                 - sum(edge.expected_profit for edge in before_snapshot.candidate_edges),
                 "new_candidate_profit": sum(edge.expected_profit for edge in new_edges),
+                "new_candidate_margin": sum(edge.immediate_profit for edge in new_edges),
+                "new_candidate_energy_loss_kwh": sum(edge.energy_loss_kwh for edge in new_edges),
                 "expired_after_wait": expired,
                 "cancelled_after_wait": cancelled,
             }

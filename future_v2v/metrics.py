@@ -31,6 +31,20 @@ class EpisodeMetrics:
     fleet_utilization: float
     private_utilization: float
     energy_utilization: float
+    unmet_kwh: float = 0.0
+    delivered_kwh: float = 0.0
+    donor_output_kwh: float = 0.0
+    energy_loss_kwh: float = 0.0
+    buyer_payment: float = 0.0
+    seller_reimbursement: float = 0.0
+    seller_energy_cost: float = 0.0
+    seller_degradation_cost: float = 0.0
+    seller_service_premium: float = 0.0
+    platform_margin: float = 0.0
+    mean_donor_soc_after: float = 0.0
+    min_donor_soc_after: float = 0.0
+    donor_soc_violation_count: int = 0
+    battery_health_rejection_count: int = 0
     scenario_id: str = ""
     scenario_day: str = ""
     scenario_start_tick_day: int = 0
@@ -107,6 +121,20 @@ def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | s
         "private_utilization",
         "energy_utilization",
         "dispatch_epoch_count",
+        "unmet_kwh",
+        "delivered_kwh",
+        "donor_output_kwh",
+        "energy_loss_kwh",
+        "buyer_payment",
+        "seller_reimbursement",
+        "seller_energy_cost",
+        "seller_degradation_cost",
+        "seller_service_premium",
+        "platform_margin",
+        "mean_donor_soc_after",
+        "min_donor_soc_after",
+        "donor_soc_violation_count",
+        "battery_health_rejection_count",
     ]
     for policy, values in sorted(by_policy.items()):
         row: dict[str, float | str] = {"policy_name": policy, "episodes": len(values)}
@@ -118,6 +146,14 @@ def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | s
         service_rate = float(row["service_rate_mean"])
         expired_cancelled = float(row["expired_rate_mean"]) + float(row["cancelled_rate_mean"])
         mean_batch_interval = float(row["mean_batch_interval_mean"])
+        energy_loss_rate = float(row["energy_loss_kwh_mean"]) / max(1e-9, float(row["donor_output_kwh_mean"]))
+        seller_comp_share = float(row["seller_reimbursement_mean"]) / max(1e-9, float(row["buyer_payment_mean"]))
+        row["energy_loss_rate"] = energy_loss_rate
+        row["seller_compensation_share"] = seller_comp_share
+        row["platform_margin_per_served_order"] = float(row["platform_margin_mean"]) / max(
+            1e-9,
+            float(np.mean([value.served_orders for value in values])),
+        )
         row["timing_degenerate_risk"] = bool(mean_batch_interval <= 1.15)
         row["environment_target_band"] = bool(0.65 <= service_rate <= 0.82 and 0.08 <= expired_cancelled <= 0.22)
         rows.append(row)
