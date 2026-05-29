@@ -14,6 +14,7 @@ from torch import nn
 from future_v2v.algorithms.baselines import TimingPolicy, teacher_policies
 from future_v2v.config import TrainingConfig
 from future_v2v.envs.timing_env import MATCH, FutureV2VTimingEnv
+from future_v2v.progress import progress
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,7 @@ class DQNTimingAgent:
     ) -> list[dict[str, float | int]]:
         self._teacher_prefill(env_factory, seed_start)
         history: list[dict[str, float | int]] = []
-        for episode in range(episodes):
+        for episode in progress(range(episodes), desc="train DQN episodes", total=episodes, unit="episode"):
             env: FutureV2VTimingEnv = env_factory()
             obs, _ = env.reset(seed=seed_start + 1000 + episode)
             terminated = False
@@ -154,7 +155,12 @@ class DQNTimingAgent:
 
     def _teacher_prefill(self, env_factory: Callable[[], FutureV2VTimingEnv], seed_start: int) -> None:
         policies = teacher_policies()
-        for episode in range(self.config.teacher_prefill_episodes):
+        for episode in progress(
+            range(self.config.teacher_prefill_episodes),
+            desc="teacher replay prefill",
+            total=self.config.teacher_prefill_episodes,
+            unit="episode",
+        ):
             policy: TimingPolicy = policies[episode % len(policies)]
             env: FutureV2VTimingEnv = env_factory()
             obs, _ = env.reset(seed=seed_start + episode)

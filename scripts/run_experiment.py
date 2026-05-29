@@ -14,6 +14,7 @@ from future_v2v.algorithms.dqn import DQNTimingAgent
 from future_v2v.config import ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
 from future_v2v.metrics import EpisodeMetrics, summarize_metrics, write_csv
+from future_v2v.progress import progress
 from future_v2v.reporting import write_markdown_report
 
 
@@ -42,7 +43,10 @@ def run_generate(config: ProjectConfig, scale_name: str, run_dir: Path, seed: in
     env = make_env_factory(config, scale_name, seed)()
     scale = config.scale(scale_name)
     count = eval_episodes or min(8, scale.eval_episodes)
-    rows = [env.env_health_row(seed + idx) for idx in range(count)]
+    rows = [
+        env.env_health_row(seed + idx)
+        for idx in progress(range(count), desc="generate env health", total=count, unit="seed")
+    ]
     write_csv(run_dir / "env_health" / "env_health_summary.csv", rows)
     write_markdown_report(
         run_dir / "env_health" / "env_health_report.md",
@@ -86,10 +90,10 @@ def run_eval(config: ProjectConfig, scale_name: str, run_dir: Path, seed: int, e
         policies.append(DQNTimingAgent.load(checkpoint, config.training))
         _ = obs
     all_metrics: list[EpisodeMetrics] = []
-    for policy in policies:
-        for idx in range(count):
-            env = make_env_factory(config, scale_name, seed + idx)()
-            all_metrics.append(run_policy_episode(env, policy, seed=seed + idx))
+    tasks = [(policy, idx) for policy in policies for idx in range(count)]
+    for policy, idx in progress(tasks, desc="eval policies", total=len(tasks), unit="episode"):
+        env = make_env_factory(config, scale_name, seed + idx)()
+        all_metrics.append(run_policy_episode(env, policy, seed=seed + idx))
     detail_rows = [metric.to_row() for metric in all_metrics]
     summary_rows = summarize_metrics(all_metrics)
     write_csv(run_dir / "eval" / "episode_metrics.csv", detail_rows)
@@ -154,3 +158,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
