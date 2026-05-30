@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from future_v2v.config import EnvironmentConfig, ScaleConfig
+from future_v2v.algorithms.dqn import DQNTimingAgent
+from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig
 from future_v2v.data.tlc_manhattan import load_tlc_manhattan_data, prepare_tlc_manhattan
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
 
@@ -205,6 +206,55 @@ def test_tlc_manifest_window_replays_same_scenario(tmp_path: Path) -> None:
     assert env_a.scenario_id == "fixed_eval"
     assert [order.arrival_tick for order in env_a.orders] == [order.arrival_tick for order in env_b.orders]
     assert [vehicle.current_soc_kwh for vehicle in env_a.vehicles] == [vehicle.current_soc_kwh for vehicle in env_b.vehicles]
+
+
+def test_dqn_validation_manifest_uses_time_bucket_rows(tmp_path: Path) -> None:
+    trip_path, lookup_path = make_tlc_files(tmp_path)
+    env_config = make_env_config(tmp_path, trip_path, lookup_path)
+    prepare_tlc_manhattan(
+        trip_path=trip_path,
+        zone_lookup_path=lookup_path,
+        processed_dir=env_config.processed_dir,
+        month="2025-10",
+        tick_minutes=env_config.tick_minutes,
+        time_bucket_minutes=env_config.time_bucket_minutes,
+    )
+    scale = ScaleConfig(
+        name="unit",
+        horizon_ticks=12,
+        terminal_buffer_ticks=2,
+        total_orders=12,
+        candidate_vehicles=8,
+        vehicle_join_probability=1.0,
+        fleet_probability=0.0,
+        train_episodes=1,
+        eval_episodes=1,
+    )
+    training = TrainingConfig(
+        gamma=0.98,
+        learning_rate=0.001,
+        batch_size=4,
+        replay_capacity=100,
+        min_replay_size=4,
+        target_update_interval=10,
+        epsilon_start=1.0,
+        epsilon_end=0.1,
+        epsilon_decay_steps=100,
+        teacher_prefill_episodes=0,
+        validation_episodes=4,
+        validation_interval_episodes=1,
+        checkpoint_selection_metric="future_v2v_score_mean",
+        hidden_dim=16,
+        double_dqn=True,
+        prioritized_replay=False,
+        validation_time_buckets=["morning_peak", "off_peak"],
+    )
+    env = FutureV2VTimingEnv(env_config, scale, seed=11)
+    agent = DQNTimingAgent(obs_dim=env.observation_dim, training_config=training)
+    rows = agent._validation_manifest(env_config, scale, seed_start=123)
+    assert len(rows) == training.validation_episodes
+    assert {str(row["time_of_day_bucket"]) for row in rows}
+    assert all(str(row["scenario_id"]).startswith("val_") for row in rows)
 
 
 def test_tlc_vehicle_soc_and_price_are_bounded(tmp_path: Path) -> None:

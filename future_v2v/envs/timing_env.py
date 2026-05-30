@@ -58,6 +58,16 @@ OBSERVATION_NAMES = (
     "soc_safety_binding_rate",
     "mean_candidate_platform_margin",
     "energy_loss_rate_estimate",
+    "ticks_since_last_dispatch",
+    "estimated_top_batch_friction",
+    "estimated_full_match_friction",
+    "time_bucket_off_peak",
+    "time_bucket_morning_peak",
+    "time_bucket_midday",
+    "time_bucket_evening_peak",
+    "near_deadline_order_share",
+    "projected_service_risk",
+    "projected_urgent_service_risk",
 )
 
 
@@ -476,6 +486,35 @@ class FutureV2VTimingEnv:
         urgent_orders = [order.order_id for order in active_orders if order.is_urgent()]
         urgent_covered = {edge.order_id for edge in edges if edge.order_id in urgent_orders}
         energy_covered = {edge.order_id for edge in edges}
+        ticks_since_last_dispatch = (
+            self.current_tick - self.dispatch_ticks[-1]
+            if self.dispatch_ticks
+            else self.scale_config.horizon_ticks
+        )
+        top_capacity = self._dispatch_capacity(snapshot)
+        edge_orders = {edge.order_id for edge in edges}
+        edge_vehicles = {edge.vehicle_id for edge in edges}
+        estimated_full_matches = min(len(edge_orders), len(edge_vehicles), order_count)
+        estimated_top_matches = min(estimated_full_matches, top_capacity)
+        top_friction = self.estimate_dispatch_friction(
+            dispatch_mode="top_batch",
+            matched_count=estimated_top_matches,
+            ticks_since_last_dispatch=ticks_since_last_dispatch,
+        )
+        full_friction = self.estimate_dispatch_friction(
+            dispatch_mode="full",
+            matched_count=estimated_full_matches,
+            ticks_since_last_dispatch=ticks_since_last_dispatch,
+        )
+        bucket = self._time_bucket_name()
+        arrived_orders = [order for order in self.orders if order.arrival_tick <= self.current_tick]
+        served_orders = [order for order in arrived_orders if order.status == ORDER_MATCHED]
+        arrived_urgent = [order for order in arrived_orders if order.is_urgent()]
+        served_urgent = [order for order in arrived_urgent if order.status == ORDER_MATCHED]
+        projected_service_rate = len(served_orders) / max(1, len(arrived_orders))
+        projected_urgent_service_rate = len(served_urgent) / max(1, len(arrived_urgent))
+        service_risk = max(0.0, self.env_config.service_rate_target - projected_service_rate)
+        urgent_service_risk = max(0.0, self.env_config.urgent_service_rate_target - projected_urgent_service_rate)
         raw = np.array(
             [
                 order_count / 100.0,
@@ -509,6 +548,16 @@ class FutureV2VTimingEnv:
                 (float(np.mean(margins)) / 30.0) if margins else 0.0,
                 (sum(edge.energy_loss_kwh for edge in edges) / max(1e-9, sum(edge.donor_output_kwh for edge in edges)))
                 if edges else 0.0,
+                ticks_since_last_dispatch / max(1, self.scale_config.horizon_ticks),
+                top_friction / 100.0,
+                full_friction / 100.0,
+                1.0 if bucket == "off_peak" else 0.0,
+                1.0 if bucket == "morning_peak" else 0.0,
+                1.0 if bucket == "midday" else 0.0,
+                1.0 if bucket == "evening_peak" else 0.0,
+                near_deadline / max(1, order_count),
+                service_risk,
+                urgent_service_risk,
             ],
             dtype=np.float32,
         )
@@ -557,26 +606,60 @@ class FutureV2VTimingEnv:
         if not friction.enabled:
             return
         ticks_since_last = tick - self.dispatch_ticks[-1] if self.dispatch_ticks else float("inf")
-        refresh_cost = 0.0
-        if self.dispatch_ticks and friction.refresh_cost > 0.0:
-            refresh_cost = friction.refresh_cost * float(
-                np.exp(-max(0.0, float(ticks_since_last)) / max(1e-6, friction.refresh_decay_ticks))
-            )
-        pair_cost = friction.pair_coordination_cost * max(0, int(matched_count))
-        full_extra = 0.0
-        if dispatch_mode == "full":
-            full_extra = friction.full_mode_extra_pair_cost * max(0, int(matched_count))
         result.ticks_since_last_dispatch = float(ticks_since_last if self.dispatch_ticks else -1.0)
         result.dispatch_setup_cost = float(friction.setup_cost)
-        result.dispatch_pair_coordination_cost = float(pair_cost)
-        result.dispatch_refresh_cost = float(refresh_cost)
-        result.dispatch_full_mode_extra_cost = float(full_extra)
-        result.dispatch_friction_cost = float(friction.setup_cost + pair_cost + refresh_cost + full_extra)
+        result.dispatch_pair_coordination_cost = float(
+            friction.pair_coordination_cost * max(0, int(matched_count))
+        )
+        result.dispatch_refresh_cost = float(
+            self._dispatch_refresh_cost(ticks_since_last)
+            if self.dispatch_ticks
+            else 0.0
+        )
+        result.dispatch_full_mode_extra_cost = float(
+            friction.full_mode_extra_pair_cost * max(0, int(matched_count))
+            if dispatch_mode == "full"
+            else 0.0
+        )
+        result.dispatch_friction_cost = float(
+            result.dispatch_setup_cost
+            + result.dispatch_pair_coordination_cost
+            + result.dispatch_refresh_cost
+            + result.dispatch_full_mode_extra_cost
+        )
         result.friction_share_of_gross_profit = (
             result.dispatch_friction_cost / result.gross_dispatch_profit
             if result.gross_dispatch_profit > 0.0
             else 0.0
         )
+
+    def estimate_dispatch_friction(
+        self,
+        *,
+        dispatch_mode: str,
+        matched_count: int,
+        ticks_since_last_dispatch: float,
+    ) -> float:
+        friction = self.env_config.dispatch_friction
+        if not friction.enabled:
+            return 0.0
+        pair_cost = friction.pair_coordination_cost * max(0, int(matched_count))
+        full_extra = (
+            friction.full_mode_extra_pair_cost * max(0, int(matched_count))
+            if dispatch_mode == "full"
+            else 0.0
+        )
+        refresh_cost = self._dispatch_refresh_cost(ticks_since_last_dispatch)
+        return float(friction.setup_cost + pair_cost + full_extra + refresh_cost)
+
+    def _dispatch_refresh_cost(self, ticks_since_last_dispatch: float) -> float:
+        friction = self.env_config.dispatch_friction
+        refresh_cost = 0.0
+        if np.isfinite(ticks_since_last_dispatch) and friction.refresh_cost > 0.0:
+            refresh_cost = friction.refresh_cost * float(
+                np.exp(-max(0.0, float(ticks_since_last_dispatch)) / max(1e-6, friction.refresh_decay_ticks))
+            )
+        return float(refresh_cost)
 
     def _step_reward(self, result: StepResult) -> float:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
@@ -585,11 +668,29 @@ class FutureV2VTimingEnv:
         batch_bonus = 0.0
         if result.dispatch_executed and result.accepted_count > 0:
             batch_bonus = min(6.0, 0.15 * result.accepted_count)
+        arrived_orders = [order for order in self.orders if order.arrival_tick <= self.current_tick]
+        served_orders = [order for order in arrived_orders if order.status == ORDER_MATCHED]
+        arrived_urgent = [order for order in arrived_orders if order.is_urgent()]
+        served_urgent = [order for order in arrived_urgent if order.status == ORDER_MATCHED]
+        service_rate_so_far = len(served_orders) / max(1, len(arrived_orders))
+        urgent_service_rate_so_far = len(served_urgent) / max(1, len(arrived_urgent))
+        expired_rate_so_far = (
+            sum(1 for order in arrived_orders if order.status == ORDER_EXPIRED) / max(1, len(arrived_orders))
+        )
+        service_risk_penalty = 0.0
+        if len(arrived_orders) >= max(20, int(self.scale_config.total_orders * 0.05)):
+            service_gap = max(0.0, self.env_config.service_rate_target - service_rate_so_far)
+            urgent_gap = max(0.0, self.env_config.urgent_service_rate_target - urgent_service_rate_so_far)
+            expired_gap = max(0.0, expired_rate_so_far - self.env_config.expired_rate_cap)
+            service_risk_penalty = self.env_config.profit_scale_fallback * len(arrived_orders) * (
+                0.18 * service_gap + 0.22 * urgent_gap + 0.14 * expired_gap
+            )
         return (
             result.platform_profit
             - self.env_config.expired_penalty * result.expired_count
             - self.env_config.cancelled_penalty * result.cancelled_count
             - wait_penalty
+            - service_risk_penalty
             + batch_bonus
         )
 
@@ -597,6 +698,17 @@ class FutureV2VTimingEnv:
         ratio = float(self.env_config.dispatch_capacity_ratio)
         raw = int(np.ceil(len(snapshot.active_orders) * ratio))
         return int(np.clip(raw, self.env_config.dispatch_capacity_min, self.env_config.dispatch_capacity_max))
+
+    def _time_bucket_name(self) -> str:
+        tick_day = self.scenario_start_tick_day + self.current_tick
+        hour = ((tick_day * self.env_config.tick_minutes) % 1440) / 60.0
+        if 6 <= hour < 10:
+            return "morning_peak"
+        if 10 <= hour < 15:
+            return "midday"
+        if 15 <= hour < 20:
+            return "evening_peak"
+        return "off_peak"
 
     def _record_action_trace(
         self,

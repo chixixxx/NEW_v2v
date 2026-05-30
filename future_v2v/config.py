@@ -106,6 +106,9 @@ class TrainingConfig:
     double_dqn: bool
     prioritized_replay: bool
     rollout_workers: int = 1
+    validation_time_buckets: list[str] = field(
+        default_factory=lambda: ["morning_peak", "midday", "evening_peak", "off_peak"]
+    )
 
 
 @dataclass(frozen=True)

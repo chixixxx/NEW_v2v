@@ -96,6 +96,7 @@
     "hidden_dim": 128,
     "double_dqn": true,
     "prioritized_replay": true,
-    "rollout_workers": 4
+    "rollout_workers": 4,
+    "validation_time_buckets": ["morning_peak", "midday", "evening_peak", "off_peak"]
   }
 }

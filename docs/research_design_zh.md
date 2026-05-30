@@ -121,3 +121,12 @@ teacher replay prefill 只输出同一动作空间下的 `WAIT / MATCH_TOP_BATCH
 - `no_dispatch_friction`：诊断完全无交易摩擦时是否自然退化为高频匹配。
 
 主结论必须来自 `decomposed_transaction_cost`，并且 `no_refresh_friction` 下仍保留正向 paired delta，才认为环境具备可信动态匹配区分度。
+## DQN 可学习性增强
+
+为避免 DQN 在交易摩擦环境中学成高频 `MATCH_TOP_BATCH`，观测增加 `ticks_since_last_dispatch`、top/full 预估摩擦、time-of-day bucket、临期订单占比和 projected service risk。
+
+step reward 继续以即时平台利润为主，但额外加入 service-risk shaping：当已到达订单的服务率、急单服务率或过期率明显偏离最终约束利润目标时，提前给出惩罚信号，缓解 episode 末端才体现约束损失的信用分配问题。
+
+teacher replay prefill 只使用同一动作空间，但强化 `fixed_2_tick_full_match` 和 deadline rescue 样本，让 DQN 明确学习何时等待、何时用 `MATCH_FULL` 兜住临期服务风险。
+
+checkpoint selection 使用分层 validation manifest 覆盖 `morning_peak / midday / evening_peak / off_peak`，并按 `0.70 * mean_score + 0.30 * worst_bucket_score` 选择 checkpoint，减少模型在 off-peak stress 窗口突然崩盘的风险。

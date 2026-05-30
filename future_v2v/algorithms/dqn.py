@@ -88,6 +88,7 @@ class DQNTimingAgent:
         self.validation_history: list[dict[str, float | int]] = []
         self.best_state_dict: dict[str, torch.Tensor] | None = None
         self.best_validation_score = float("-inf")
+        self._validation_scenarios: list[dict[str, object]] | None = None
 
     def act(self, env: FutureV2VTimingEnv, obs: np.ndarray, epsilon: float = 0.0) -> int:
         _ = env
@@ -282,9 +283,19 @@ class DQNTimingAgent:
         scores = []
         profits = []
         dispatch_counts = []
-        for idx in range(self.config.validation_episodes):
+        bucket_scores: dict[str, list[float]] = {}
+        scenarios = self._validation_manifest(env_config, scale_config, seed_start)
+        for idx, scenario in enumerate(scenarios):
             env = FutureV2VTimingEnv(env_config, scale_config, seed=seed_start + 50_000 + idx)
-            obs, _ = env.reset(seed=seed_start + 50_000 + idx)
+            if scenario.get("day") and scenario.get("start_tick_day") != "":
+                obs, _ = env.reset_to_tlc_window(
+                    seed=int(scenario["seed"]),
+                    day=str(scenario["day"]),
+                    start_tick_day=int(scenario["start_tick_day"]),
+                    scenario_id=str(scenario["scenario_id"]),
+                )
+            else:
+                obs, _ = env.reset(seed=int(scenario["seed"]))
             terminated = False
             truncated = False
             while not (terminated or truncated):
@@ -295,17 +306,78 @@ class DQNTimingAgent:
             scores.append(metrics.future_v2v_score)
             profits.append(metrics.platform_profit)
             dispatch_counts.append(metrics.dispatch_epoch_count)
+            bucket = str(scenario.get("time_of_day_bucket", "unknown"))
+            bucket_scores.setdefault(bucket, []).append(metrics.future_v2v_score)
+        bucket_means = {
+            bucket: float(np.mean(values))
+            for bucket, values in bucket_scores.items()
+            if values
+        }
         row = {
             "episode": episode,
             "future_v2v_score_mean": float(np.mean(scores)),
             "platform_profit_mean": float(np.mean(profits)),
             "dispatch_epoch_count_mean": float(np.mean(dispatch_counts)),
+            "validation_bucket_min_score_mean": float(min(bucket_means.values())) if bucket_means else 0.0,
         }
+        for bucket in self.config.validation_time_buckets:
+            row[f"validation_{bucket}_score_mean"] = bucket_means.get(bucket, 0.0)
         self.validation_history.append(row)
-        score = float(row["future_v2v_score_mean"])
+        score = 0.70 * float(row["future_v2v_score_mean"]) + 0.30 * float(row["validation_bucket_min_score_mean"])
         if score > self.best_validation_score:
             self.best_validation_score = score
             self.best_state_dict = {key: value.detach().cpu().clone() for key, value in self.online.state_dict().items()}
+
+    def _validation_manifest(
+        self,
+        env_config: EnvironmentConfig,
+        scale_config: ScaleConfig,
+        seed_start: int,
+    ) -> list[dict[str, object]]:
+        if self._validation_scenarios is not None:
+            return self._validation_scenarios
+        env = FutureV2VTimingEnv(env_config, scale_config, seed=seed_start + 50_000)
+        generator = getattr(env, "generator", None)
+        buckets = list(self.config.validation_time_buckets) or ["unknown"]
+        total = max(1, int(self.config.validation_episodes))
+        per_bucket = max(1, math.ceil(total / len(buckets)))
+        rows: list[dict[str, object]] = []
+        if hasattr(generator, "manifest_row"):
+            bucket_counts = {bucket: 0 for bucket in buckets}
+            attempts = 0
+            max_attempts = max(200, total * 80)
+            while len(rows) < total and attempts < max_attempts:
+                row = generator.manifest_row(
+                    seed=seed_start + 60_000 + attempts,
+                    scenario_id=f"val_{len(rows):03d}",
+                )
+                bucket = str(row.get("time_of_day_bucket", ""))
+                if bucket in bucket_counts and bucket_counts[bucket] < per_bucket:
+                    row["scenario_id"] = f"val_{len(rows):03d}_{bucket}"
+                    rows.append(dict(row))
+                    bucket_counts[bucket] += 1
+                attempts += 1
+            attempts = 0
+            while len(rows) < total and attempts < max_attempts:
+                row = generator.manifest_row(
+                    seed=seed_start + 70_000 + attempts,
+                    scenario_id=f"val_{len(rows):03d}",
+                )
+                rows.append(dict(row))
+                attempts += 1
+        while len(rows) < total:
+            idx = len(rows)
+            rows.append(
+                {
+                    "scenario_id": f"val_{idx:03d}",
+                    "seed": seed_start + 50_000 + idx,
+                    "day": "",
+                    "start_tick_day": "",
+                    "time_of_day_bucket": "unknown",
+                }
+            )
+        self._validation_scenarios = rows[:total]
+        return self._validation_scenarios
 
     def _restore_best_checkpoint(self) -> None:
         if self.best_state_dict is None:

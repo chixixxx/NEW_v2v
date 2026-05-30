@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from future_v2v.config import DispatchFrictionConfig, EnvironmentConfig, ScaleConfig
-from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, WAIT, FutureV2VTimingEnv
+from future_v2v.algorithms.baselines import teacher_policies
+from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, OBSERVATION_NAMES, WAIT, FutureV2VTimingEnv
 from future_v2v.simulation.entities import ORDER_EXPIRED, ORDER_MATCHED, Order, Vehicle
 
 
@@ -190,6 +191,63 @@ def test_refresh_friction_decays_smoothly_after_recent_dispatch() -> None:
     env.step(WAIT)
     _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
     assert 0.0 < info["step_result"].dispatch_refresh_cost < one_tick_cost
+
+
+def test_observation_exposes_dispatch_timing_and_service_risk_features() -> None:
+    env = make_env()
+    env.env_config = env.env_config.__class__(
+        **{
+            **env.env_config.__dict__,
+            "dispatch_friction": DispatchFrictionConfig(
+                enabled=True,
+                setup_cost=10.0,
+                pair_coordination_cost=1.0,
+                full_mode_extra_pair_cost=2.0,
+                refresh_cost=9.0,
+                refresh_decay_ticks=1.0,
+            ),
+        }
+    )
+    env.matcher.env_config = env.env_config
+    install_single_order_vehicle(env, max_wait_ticks=1)
+    env.current_tick = 1
+    env.dispatch_ticks = [0]
+    obs = env._observation()
+    values = dict(zip(OBSERVATION_NAMES, obs))
+    assert values["ticks_since_last_dispatch"] > 0.0
+    assert values["estimated_top_batch_friction"] > 0.0
+    assert values["estimated_full_match_friction"] > values["estimated_top_batch_friction"]
+    assert values["near_deadline_order_share"] == 1.0
+    assert values["projected_service_risk"] > 0.0
+
+
+def test_service_risk_shaping_penalizes_falling_behind_arrived_demand() -> None:
+    env = make_env()
+    orders = [
+        Order(
+            order_id=idx,
+            arrival_tick=0,
+            origin_zone=0,
+            destination_zone=1,
+            demand_kwh=5.0,
+            max_wait_ticks=10,
+            willingness_to_pay_per_kwh=8.0,
+            cancel_sensitivity=0.0,
+        )
+        for idx in range(25)
+    ]
+    env.orders = orders
+    env.vehicles = []
+    env.orders_by_id = {order.order_id: order for order in orders}
+    env.vehicles_by_id = {}
+    env.current_tick = 1
+    reward = env._step_reward(env.last_step_result)
+    assert reward < -10.0
+
+
+def test_teacher_prefill_policies_include_full_match_rescue() -> None:
+    actions = {policy.act(make_env(), make_env()._observation()) for policy in teacher_policies()}
+    assert MATCH_FULL in actions
 
 
 def test_action_traces_record_wait_and_dispatch() -> None:

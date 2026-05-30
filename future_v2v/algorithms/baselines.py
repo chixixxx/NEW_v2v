@@ -168,8 +168,9 @@ def policy_from_name(name: str) -> TimingPolicy:
 
 def teacher_policies() -> list[TimingPolicy]:
     return [
-        DeadlineTriggerPolicy(),
-        SupplyDemandPressurePolicy(),
+        FixedIntervalPolicy(interval=2, match_action=MATCH_FULL),
+        DeadlineTriggerPolicy(slack_threshold=2, full_match_wait_ratio=0.92),
+        SupplyDemandPressurePolicy(pressure_threshold=0.62, min_mean_edge_profit=7.0),
         ShortLookaheadTimingPolicy(),
     ]
 

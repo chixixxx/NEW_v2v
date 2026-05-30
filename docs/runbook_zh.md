@@ -150,3 +150,10 @@ max_discharge_power_kw = 50.0
 python -m ruff check future_v2v scripts tests
 python -m pytest tests -q
 ```
+## DQN 训练与验证更新
+
+DQN 观测已经包含 dispatch 间隔、top/full 预估交易摩擦、time-of-day bucket、临期订单占比和服务风险。训练 reward 增加 service-risk shaping，用来提前惩罚服务率、急单服务率和过期率偏离最终约束利润目标的状态。
+
+`teacher_prefill_episodes` 会混入同一动作空间下的 `fixed_2_tick_full_match`、deadline rescue、supply-demand pressure 和 short-lookahead 样本。teacher 不直接输出匹配边，仍只输出 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`。
+
+checkpoint selection 使用分层 validation：`training.validation_time_buckets` 默认覆盖 `morning_peak / midday / evening_peak / off_peak`。`train/validation_history.csv` 会输出各 bucket 的 score mean 和 `validation_bucket_min_score_mean`，最终 checkpoint 按平均表现和最差 bucket 共同选择。
