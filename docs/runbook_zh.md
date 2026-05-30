@@ -152,8 +152,10 @@ python -m pytest tests -q
 ```
 ## DQN 训练与验证更新
 
-DQN 观测已经包含 dispatch 间隔、top/full 预估交易摩擦、time-of-day bucket、临期订单占比和服务风险。训练 reward 增加 service-risk shaping，用来提前惩罚服务率、急单服务率和过期率偏离最终约束利润目标的状态。
+DQN 观测已经包含 dispatch 间隔、top/full 预估交易摩擦、time-of-day bucket、临期订单占比和服务风险。训练 reward 使用 service-risk delta shaping：奖励动作后服务风险潜势下降，惩罚风险潜势上升，避免 WAIT 被 absolute service gap 持续压低。
 
-`teacher_prefill_episodes` 会混入同一动作空间下的 `fixed_2_tick_full_match`、deadline rescue、supply-demand pressure 和 short-lookahead 样本。teacher 不直接输出匹配边，仍只输出 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`。
+WAIT 动作会根据 one-step wait tradeoff 获得轻量 opportunity bonus。若 WAIT 后候选边收益增量大于过期、取消、等待和刷新摩擦风险，则奖励 WAIT；若临期损失大，则不奖励。
 
-checkpoint selection 使用分层 validation：`training.validation_time_buckets` 默认覆盖 `morning_peak / midday / evening_peak / off_peak`。`train/validation_history.csv` 会输出各 bucket 的 score mean 和 `validation_bucket_min_score_mean`，最终 checkpoint 按平均表现和最差 bucket 共同选择。
+`teacher_prefill_episodes` 会混入同一动作空间下的 `WaitOpportunityTeacherPolicy`、`fixed_2_tick_full_match`、deadline rescue、supply-demand pressure 和 short-lookahead 样本。teacher 不直接输出匹配边，仍只输出 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`。
+
+checkpoint selection 使用分层 validation：`training.validation_time_buckets` 默认覆盖 `morning_peak / midday / evening_peak / off_peak`。`train/validation_history.csv` 会输出各 bucket 的 score mean、`validation_bucket_min_score_mean`、`validation_off_peak_floor_penalty` 和 `checkpoint_selection_score`。

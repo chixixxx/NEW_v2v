@@ -50,6 +50,10 @@
     "profit_scale_fallback": 5.0,
     "enable_stochastic_acceptance": true,
     "enable_stochastic_cancellation": true,
+    "service_risk_delta_weight": 0.12,
+    "service_risk_delta_clip": 35.0,
+    "wait_opportunity_weight": 0.02,
+    "wait_opportunity_cap": 1200.0,
     "battery_health": {
       "donor_min_soc_ratio": 0.25,
       "transfer_efficiency": 0.90,
@@ -97,6 +101,8 @@
     "double_dqn": true,
     "prioritized_replay": true,
     "rollout_workers": 4,
-    "validation_time_buckets": ["morning_peak", "midday", "evening_peak", "off_peak"]
+    "validation_time_buckets": ["morning_peak", "midday", "evening_peak", "off_peak"],
+    "validation_worst_bucket_weight": 0.15,
+    "validation_off_peak_score_floor": 0.0
   }
 }

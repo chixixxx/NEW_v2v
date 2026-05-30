@@ -147,6 +147,57 @@ class ShortLookaheadTimingPolicy:
         return MATCH_TOP_BATCH if pressure >= 0.82 or current_profit > self.min_profit_gain * 3.0 else WAIT
 
 
+@dataclass
+class WaitOpportunityTeacherPolicy:
+    min_wait_opportunity: float = 120.0
+    low_order_share: float = 0.08
+    high_refresh_cost: float = 5.0
+    max_near_deadline_share: float = 0.18
+
+    name: str = "wait_opportunity_teacher"
+
+    def act(self, env: FutureV2VTimingEnv, obs: np.ndarray) -> int:
+        _ = obs
+        snapshot = env.snapshot()
+        if not snapshot.active_orders:
+            return WAIT
+        near_deadline_share = sum(
+            1
+            for order in snapshot.active_orders
+            if order.max_wait_ticks - order.waiting_ticks(env.current_tick) <= 1
+        ) / max(1, len(snapshot.active_orders))
+        if near_deadline_share >= self.max_near_deadline_share:
+            return MATCH_FULL
+        recently_dispatched = bool(env.dispatch_ticks and env.current_tick - env.dispatch_ticks[-1] <= 1)
+        if recently_dispatched:
+            return WAIT
+        wait_opportunity = env.estimate_wait_opportunity(snapshot)
+        order_share = len(snapshot.active_orders) / max(1, env.scale_config.total_orders)
+        current_top_profit = sum(
+            match.expected_profit
+            for match in env.matcher.solve(
+                env.orders,
+                env.vehicles,
+                env.current_tick,
+                dispatch_mode="top_batch",
+                capacity=env._dispatch_capacity(snapshot),
+            ).matches
+        )
+        ticks_since_last = env.current_tick - env.dispatch_ticks[-1] if env.dispatch_ticks else float("inf")
+        top_friction = env.estimate_dispatch_friction(
+            dispatch_mode="top_batch",
+            matched_count=min(len(snapshot.active_orders), env._dispatch_capacity(snapshot)),
+            ticks_since_last_dispatch=ticks_since_last,
+        )
+        if wait_opportunity >= self.min_wait_opportunity:
+            return WAIT
+        if order_share <= self.low_order_share and wait_opportunity > 0.0:
+            return WAIT
+        if top_friction >= self.high_refresh_cost and current_top_profit < top_friction * 1.8:
+            return WAIT
+        return MATCH_TOP_BATCH
+
+
 def default_baselines() -> list[TimingPolicy]:
     return [
         FixedIntervalPolicy(interval=1, match_action=MATCH_FULL),
@@ -168,6 +219,7 @@ def policy_from_name(name: str) -> TimingPolicy:
 
 def teacher_policies() -> list[TimingPolicy]:
     return [
+        WaitOpportunityTeacherPolicy(),
         FixedIntervalPolicy(interval=2, match_action=MATCH_FULL),
         DeadlineTriggerPolicy(slack_threshold=2, full_match_wait_ratio=0.92),
         SupplyDemandPressurePolicy(pressure_threshold=0.62, min_mean_edge_profit=7.0),

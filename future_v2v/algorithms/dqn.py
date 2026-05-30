@@ -15,7 +15,7 @@ from torch import nn
 
 from future_v2v.algorithms.baselines import TimingPolicy, teacher_policies
 from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig
-from future_v2v.envs.timing_env import ACTION_COUNT, MATCH_FULL, MATCH_TOP_BATCH, FutureV2VTimingEnv
+from future_v2v.envs.timing_env import ACTION_COUNT, MATCH_FULL, MATCH_TOP_BATCH, WAIT, FutureV2VTimingEnv
 from future_v2v.progress import progress
 
 
@@ -322,11 +322,33 @@ class DQNTimingAgent:
         }
         for bucket in self.config.validation_time_buckets:
             row[f"validation_{bucket}_score_mean"] = bucket_means.get(bucket, 0.0)
+        mean_score = float(row["future_v2v_score_mean"])
+        worst_bucket_score = float(row["validation_bucket_min_score_mean"])
+        off_peak_score = float(row.get("validation_off_peak_score_mean", 0.0))
+        checkpoint_selection_score, off_peak_floor_penalty = self._checkpoint_selection_score(
+            mean_score=mean_score,
+            worst_bucket_score=worst_bucket_score,
+            off_peak_score=off_peak_score,
+        )
+        row["validation_off_peak_floor_penalty"] = off_peak_floor_penalty
+        row["checkpoint_selection_score"] = checkpoint_selection_score
         self.validation_history.append(row)
-        score = 0.70 * float(row["future_v2v_score_mean"]) + 0.30 * float(row["validation_bucket_min_score_mean"])
+        score = checkpoint_selection_score
         if score > self.best_validation_score:
             self.best_validation_score = score
             self.best_state_dict = {key: value.detach().cpu().clone() for key, value in self.online.state_dict().items()}
+
+    def _checkpoint_selection_score(
+        self,
+        *,
+        mean_score: float,
+        worst_bucket_score: float,
+        off_peak_score: float,
+    ) -> tuple[float, float]:
+        worst_weight = float(np.clip(self.config.validation_worst_bucket_weight, 0.0, 1.0))
+        off_peak_floor_penalty = max(0.0, float(self.config.validation_off_peak_score_floor) - off_peak_score)
+        score = (1.0 - worst_weight) * mean_score + worst_weight * worst_bucket_score - off_peak_floor_penalty
+        return float(score), float(off_peak_floor_penalty)
 
     def _validation_manifest(
         self,
@@ -408,8 +430,11 @@ class DQNTimingAgent:
             truncated = False
             while not (terminated or truncated):
                 action = policy.act(env, obs)
+                wait_opportunity = env.estimate_wait_opportunity() if action == WAIT else 0.0
                 next_obs, reward, terminated, truncated, _info = env.step(action)
                 priority = 1.5 + abs(reward) / 20.0 + (0.5 if action in (MATCH_TOP_BATCH, MATCH_FULL) else 0.0)
+                if action == WAIT and wait_opportunity > 0.0:
+                    priority += 0.35
                 self.replay.add(Transition(obs, action, reward, next_obs, terminated or truncated, priority))
                 obs = next_obs
 

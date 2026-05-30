@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from future_v2v.config import DispatchFrictionConfig, EnvironmentConfig, ScaleConfig
-from future_v2v.algorithms.baselines import teacher_policies
+from future_v2v.algorithms.baselines import WaitOpportunityTeacherPolicy, teacher_policies
 from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, OBSERVATION_NAMES, WAIT, FutureV2VTimingEnv
 from future_v2v.simulation.entities import ORDER_EXPIRED, ORDER_MATCHED, Order, Vehicle
 
@@ -221,7 +221,7 @@ def test_observation_exposes_dispatch_timing_and_service_risk_features() -> None
     assert values["projected_service_risk"] > 0.0
 
 
-def test_service_risk_shaping_penalizes_falling_behind_arrived_demand() -> None:
+def test_service_risk_delta_shaping_rewards_risk_improvement() -> None:
     env = make_env()
     orders = [
         Order(
@@ -241,8 +241,37 @@ def test_service_risk_shaping_penalizes_falling_behind_arrived_demand() -> None:
     env.orders_by_id = {order.order_id: order for order in orders}
     env.vehicles_by_id = {}
     env.current_tick = 1
-    reward = env._step_reward(env.last_step_result)
-    assert reward < -10.0
+    risk_now = env.service_risk_potential()
+    improved_reward = env._step_reward(env.last_step_result, risk_before=risk_now + 100.0)
+    worsened_reward = env._step_reward(env.last_step_result, risk_before=risk_now - 100.0)
+    assert improved_reward > worsened_reward
+
+
+def test_wait_opportunity_bonus_rewards_candidate_gain_without_losses() -> None:
+    env = make_env()
+    env._last_wait_tradeoff = {
+        "candidate_profit_delta": 500.0,
+        "expired_after_wait": 0,
+        "cancelled_after_wait": 0,
+    }
+    bonus = env._wait_opportunity_bonus(wait_penalty=0.0)
+    env._last_wait_tradeoff = {
+        "candidate_profit_delta": 500.0,
+        "expired_after_wait": 60,
+        "cancelled_after_wait": 0,
+    }
+    loss_bonus = env._wait_opportunity_bonus(wait_penalty=0.0)
+    assert bonus > 0.0
+    assert loss_bonus == 0.0
+
+
+def test_wait_opportunity_teacher_waits_after_recent_dispatch() -> None:
+    env = make_env()
+    install_single_order_vehicle(env, max_wait_ticks=10)
+    env.dispatch_ticks = [0]
+    env.current_tick = 1
+    policy = WaitOpportunityTeacherPolicy()
+    assert policy.act(env, env._observation()) == WAIT
 
 
 def test_teacher_prefill_policies_include_full_match_rescue() -> None:

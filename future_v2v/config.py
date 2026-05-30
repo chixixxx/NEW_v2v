@@ -55,6 +55,10 @@ class EnvironmentConfig:
     profit_scale_fallback: float
     enable_stochastic_acceptance: bool
     enable_stochastic_cancellation: bool
+    service_risk_delta_weight: float = 0.12
+    service_risk_delta_clip: float = 35.0
+    wait_opportunity_weight: float = 0.02
+    wait_opportunity_cap: float = 1200.0
     scenario_source: str = "synthetic"
     allow_synthetic_smoke_fallback: bool = True
     tlc_trip_path: str = ""
@@ -109,6 +113,8 @@ class TrainingConfig:
     validation_time_buckets: list[str] = field(
         default_factory=lambda: ["morning_peak", "midday", "evening_peak", "off_peak"]
     )
+    validation_worst_bucket_weight: float = 0.15
+    validation_off_peak_score_floor: float = 0.0
 
 
 @dataclass(frozen=True)

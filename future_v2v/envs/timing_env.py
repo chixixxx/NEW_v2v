@@ -100,6 +100,7 @@ class FutureV2VTimingEnv:
         self.action_trace: list[dict[str, object]] = []
         self.dispatch_trace: list[dict[str, object]] = []
         self.wait_tradeoff_trace: list[dict[str, object]] = []
+        self._last_wait_tradeoff: dict[str, object] | None = None
         self._next_action_q_values: tuple[float, ...] | None = None
         self.scenario_id = ""
         self.scenario_day = ""
@@ -151,6 +152,7 @@ class FutureV2VTimingEnv:
         self.action_trace = []
         self.dispatch_trace = []
         self.wait_tradeoff_trace = []
+        self._last_wait_tradeoff = None
         self._next_action_q_values = None
         self.scenario_id = scenario.scenario_id
         self.scenario_day = scenario.day
@@ -170,6 +172,7 @@ class FutureV2VTimingEnv:
         self._refresh_vehicle_status()
         tick = self.current_tick
         before_snapshot = self.snapshot()
+        risk_before = self.service_risk_potential()
         q_values = self._next_action_q_values
         self._next_action_q_values = None
         result = StepResult(dispatch_executed=action in (MATCH_TOP_BATCH, MATCH_FULL), dispatch_mode=ACTION_NAMES[action])
@@ -227,9 +230,16 @@ class FutureV2VTimingEnv:
         result.cancelled_count = cancelled
         self.last_step_result = result
         if action == WAIT:
-            self._record_wait_tradeoff_trace(tick, before_snapshot, expired=expired, cancelled=cancelled)
+            self._last_wait_tradeoff = self._record_wait_tradeoff_trace(
+                tick,
+                before_snapshot,
+                expired=expired,
+                cancelled=cancelled,
+            )
+        else:
+            self._last_wait_tradeoff = None
         self._record_action_trace(tick, action, before_snapshot, result, q_values)
-        reward = self._step_reward(result)
+        reward = self._step_reward(result, risk_before=risk_before)
         terminated = self.current_tick >= self.scale_config.horizon_ticks + self.scale_config.terminal_buffer_ticks
         truncated = False
         obs = self._observation()
@@ -661,38 +671,97 @@ class FutureV2VTimingEnv:
             )
         return float(refresh_cost)
 
-    def _step_reward(self, result: StepResult) -> float:
+    def service_risk_potential(self) -> float:
+        arrived_orders = [order for order in self.orders if order.arrival_tick <= self.current_tick]
+        if len(arrived_orders) < max(20, int(self.scale_config.total_orders * 0.05)):
+            return 0.0
+        served_orders = [order for order in arrived_orders if order.status == ORDER_MATCHED]
+        arrived_urgent = [order for order in arrived_orders if order.is_urgent()]
+        served_urgent = [order for order in arrived_urgent if order.status == ORDER_MATCHED]
+        service_rate = len(served_orders) / max(1, len(arrived_orders))
+        urgent_service_rate = len(served_urgent) / max(1, len(arrived_urgent))
+        expired_rate = (
+            sum(1 for order in arrived_orders if order.status == ORDER_EXPIRED) / max(1, len(arrived_orders))
+        )
+        cancelled_rate = (
+            sum(1 for order in arrived_orders if order.status == ORDER_CANCELLED) / max(1, len(arrived_orders))
+        )
+        service_gap = max(0.0, self.env_config.service_rate_target - service_rate)
+        urgent_gap = max(0.0, self.env_config.urgent_service_rate_target - urgent_service_rate)
+        expired_gap = max(0.0, expired_rate - self.env_config.expired_rate_cap)
+        cancelled_gap = max(0.0, cancelled_rate - self.env_config.cancelled_rate_cap)
+        return float(
+            self.env_config.profit_scale_fallback
+            * len(arrived_orders)
+            * (1.20 * service_gap + 1.50 * urgent_gap + expired_gap + 0.80 * cancelled_gap)
+        )
+
+    def _step_reward(self, result: StepResult, *, risk_before: float | None = None) -> float:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
             [order for order in self.orders if order.is_active(self.current_tick)]
         )
         batch_bonus = 0.0
         if result.dispatch_executed and result.accepted_count > 0:
             batch_bonus = min(6.0, 0.15 * result.accepted_count)
-        arrived_orders = [order for order in self.orders if order.arrival_tick <= self.current_tick]
-        served_orders = [order for order in arrived_orders if order.status == ORDER_MATCHED]
-        arrived_urgent = [order for order in arrived_orders if order.is_urgent()]
-        served_urgent = [order for order in arrived_urgent if order.status == ORDER_MATCHED]
-        service_rate_so_far = len(served_orders) / max(1, len(arrived_orders))
-        urgent_service_rate_so_far = len(served_urgent) / max(1, len(arrived_urgent))
-        expired_rate_so_far = (
-            sum(1 for order in arrived_orders if order.status == ORDER_EXPIRED) / max(1, len(arrived_orders))
-        )
-        service_risk_penalty = 0.0
-        if len(arrived_orders) >= max(20, int(self.scale_config.total_orders * 0.05)):
-            service_gap = max(0.0, self.env_config.service_rate_target - service_rate_so_far)
-            urgent_gap = max(0.0, self.env_config.urgent_service_rate_target - urgent_service_rate_so_far)
-            expired_gap = max(0.0, expired_rate_so_far - self.env_config.expired_rate_cap)
-            service_risk_penalty = self.env_config.profit_scale_fallback * len(arrived_orders) * (
-                0.18 * service_gap + 0.22 * urgent_gap + 0.14 * expired_gap
+        risk_after = self.service_risk_potential()
+        if risk_before is None:
+            risk_before = risk_after
+        service_delta_reward = self.env_config.service_risk_delta_weight * float(
+            np.clip(
+                risk_before - risk_after,
+                -self.env_config.service_risk_delta_clip,
+                self.env_config.service_risk_delta_clip,
             )
+        )
+        wait_opportunity_bonus = self._wait_opportunity_bonus(wait_penalty) if result.dispatch_mode == "wait" else 0.0
         return (
             result.platform_profit
             - self.env_config.expired_penalty * result.expired_count
             - self.env_config.cancelled_penalty * result.cancelled_count
             - wait_penalty
-            - service_risk_penalty
+            + service_delta_reward
+            + wait_opportunity_bonus
             + batch_bonus
         )
+
+    def _wait_opportunity_bonus(self, wait_penalty: float) -> float:
+        if not self._last_wait_tradeoff:
+            return 0.0
+        ticks_since_last = self.current_tick - self.dispatch_ticks[-1] if self.dispatch_ticks else float("inf")
+        refresh_cost = self._dispatch_refresh_cost(ticks_since_last)
+        wait_opportunity = (
+            float(self._last_wait_tradeoff.get("candidate_profit_delta", 0.0))
+            - self.env_config.expired_penalty * float(self._last_wait_tradeoff.get("expired_after_wait", 0.0))
+            - self.env_config.cancelled_penalty * float(self._last_wait_tradeoff.get("cancelled_after_wait", 0.0))
+            - refresh_cost
+            - wait_penalty
+        )
+        bounded = float(np.clip(max(0.0, wait_opportunity), 0.0, self.env_config.wait_opportunity_cap))
+        return self.env_config.wait_opportunity_weight * bounded
+
+    def estimate_wait_opportunity(self, snapshot: EnvironmentSnapshot | None = None) -> float:
+        snapshot = snapshot or self.snapshot()
+        future_orders = [order for order in self.orders if order.arrival_tick == self.current_tick + 1]
+        current_profit = sum(edge.expected_profit for edge in snapshot.candidate_edges)
+        future_profit_proxy = 0.0
+        if future_orders:
+            active_vehicles = snapshot.active_vehicles
+            for order in future_orders:
+                for vehicle in active_vehicles:
+                    if vehicle.join_tick <= self.current_tick + 1 < vehicle.leave_tick:
+                        travel = self.network.travel_minutes(vehicle.current_zone, order.origin_zone, self.current_tick + 1)
+                        if travel <= self.env_config.pickup_cap_minutes:
+                            future_profit_proxy += max(0.0, order.demand_kwh * order.willingness_to_pay_per_kwh * 0.18)
+                            break
+        ticks_since_last = (self.current_tick + 1) - self.dispatch_ticks[-1] if self.dispatch_ticks else float("inf")
+        refresh_cost = self._dispatch_refresh_cost(ticks_since_last)
+        near_deadline = sum(
+            1
+            for order in snapshot.active_orders
+            if order.max_wait_ticks - order.waiting_ticks(self.current_tick) <= 1
+        )
+        deadline_cost = self.env_config.expired_penalty * near_deadline
+        return float(future_profit_proxy + 0.08 * current_profit - refresh_cost - deadline_cost)
 
     def _dispatch_capacity(self, snapshot: EnvironmentSnapshot) -> int:
         ratio = float(self.env_config.dispatch_capacity_ratio)
@@ -797,31 +866,31 @@ class FutureV2VTimingEnv:
         *,
         expired: int,
         cancelled: int,
-    ) -> None:
+    ) -> dict[str, object]:
         after_snapshot = self.snapshot()
         before_edges = {(edge.order_id, edge.vehicle_id): edge for edge in before_snapshot.candidate_edges}
         after_edges = {(edge.order_id, edge.vehicle_id): edge for edge in after_snapshot.candidate_edges}
         new_edges = [edge for key, edge in after_edges.items() if key not in before_edges]
         before_orders = {order.order_id for order in before_snapshot.active_orders}
         after_orders = {order.order_id for order in after_snapshot.active_orders}
-        self.wait_tradeoff_trace.append(
-            {
-                "tick": tick,
-                "active_orders_before": len(before_snapshot.active_orders),
-                "active_orders_after": len(after_snapshot.active_orders),
-                "new_active_orders": len(after_orders - before_orders),
-                "candidate_edges_before": len(before_snapshot.candidate_edges),
-                "candidate_edges_after": len(after_snapshot.candidate_edges),
-                "new_candidate_edges": len(new_edges),
-                "candidate_profit_delta": sum(edge.expected_profit for edge in after_snapshot.candidate_edges)
-                - sum(edge.expected_profit for edge in before_snapshot.candidate_edges),
-                "new_candidate_profit": sum(edge.expected_profit for edge in new_edges),
-                "new_candidate_margin": sum(edge.immediate_profit for edge in new_edges),
-                "new_candidate_energy_loss_kwh": sum(edge.energy_loss_kwh for edge in new_edges),
-                "expired_after_wait": expired,
-                "cancelled_after_wait": cancelled,
-            }
-        )
+        row = {
+            "tick": tick,
+            "active_orders_before": len(before_snapshot.active_orders),
+            "active_orders_after": len(after_snapshot.active_orders),
+            "new_active_orders": len(after_orders - before_orders),
+            "candidate_edges_before": len(before_snapshot.candidate_edges),
+            "candidate_edges_after": len(after_snapshot.candidate_edges),
+            "new_candidate_edges": len(new_edges),
+            "candidate_profit_delta": sum(edge.expected_profit for edge in after_snapshot.candidate_edges)
+            - sum(edge.expected_profit for edge in before_snapshot.candidate_edges),
+            "new_candidate_profit": sum(edge.expected_profit for edge in new_edges),
+            "new_candidate_margin": sum(edge.immediate_profit for edge in new_edges),
+            "new_candidate_energy_loss_kwh": sum(edge.energy_loss_kwh for edge in new_edges),
+            "expired_after_wait": expired,
+            "cancelled_after_wait": cancelled,
+        }
+        self.wait_tradeoff_trace.append(row)
+        return row
 
     def _profit_scale(self) -> float:
         positive = [order.realized_profit for order in self.orders if order.realized_profit > 0.0]

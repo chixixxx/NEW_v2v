@@ -125,8 +125,12 @@ teacher replay prefill 只输出同一动作空间下的 `WAIT / MATCH_TOP_BATCH
 
 为避免 DQN 在交易摩擦环境中学成高频 `MATCH_TOP_BATCH`，观测增加 `ticks_since_last_dispatch`、top/full 预估摩擦、time-of-day bucket、临期订单占比和 projected service risk。
 
-step reward 继续以即时平台利润为主，但额外加入 service-risk shaping：当已到达订单的服务率、急单服务率或过期率明显偏离最终约束利润目标时，提前给出惩罚信号，缓解 episode 末端才体现约束损失的信用分配问题。
+step reward 继续以即时平台利润为主，但 service-risk shaping 采用 delta potential：比较动作前后服务风险潜势是否改善，而不是每一步惩罚“当前服务率低”。这样 WAIT 不会因为当前累计服务率偏低而天然吃亏。
+
+WAIT 动作额外使用 one-step opportunity bonus：若 WAIT 后候选边收益增量能够覆盖过期、取消、等待和刷新摩擦风险，则给轻量正奖励；若临期损失大，则不加 bonus。
 
 teacher replay prefill 只使用同一动作空间，但强化 `fixed_2_tick_full_match` 和 deadline rescue 样本，让 DQN 明确学习何时等待、何时用 `MATCH_FULL` 兜住临期服务风险。
 
-checkpoint selection 使用分层 validation manifest 覆盖 `morning_peak / midday / evening_peak / off_peak`，并按 `0.70 * mean_score + 0.30 * worst_bucket_score` 选择 checkpoint，减少模型在 off-peak stress 窗口突然崩盘的风险。
+teacher replay prefill 还加入 `WaitOpportunityTeacherPolicy`，专门提供最近刚 dispatch、临期压力低、刷新摩擦高或短窗口候选收益预计提升时的 WAIT 样本。
+
+checkpoint selection 使用分层 validation manifest 覆盖 `morning_peak / midday / evening_peak / off_peak`，并按 `0.85 * mean_score + 0.15 * worst_bucket_score - off_peak_floor_penalty` 选择 checkpoint，减少模型在 off-peak stress 窗口突然崩盘的风险，同时避免 worst bucket 权重过强导致策略过度保守。
