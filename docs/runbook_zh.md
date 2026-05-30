@@ -181,3 +181,19 @@ python scripts/summarize_timing_run.py --run-name candidate_main_v1 --scale main
 `summarize_timing_run.py` 只读取已有 CSV，不重新仿真。重点看 `dqn_vs_fixed1_delta`、`dqn_gap_to_best`、`dqn_wait_rate`、`dqn_full_match_rate`、`dqn_mean_batch_interval`、`no_refresh_delta` 和 `diagnosis`。
 
 最小通过线：DQN 相比 `fixed_1_tick_full_match` 的 paired delta 为正，`WAIT rate` 在 15%-45%，`MATCH_FULL rate` 在 10%-50%，`mean_batch_interval` 在 1.15-1.70，且 off-peak 不出现明显负分。
+
+## 环境动态等待诊断
+
+当 DQN 仍接近一步一派单时，先诊断环境是否真的支持动态等待：
+
+```bash
+python scripts/diagnose_timing_environment.py --scale main --eval-episodes 8 --max-probe-states 16 --run-name main_env_diag_v3
+```
+
+输出位于 `outputs/<run_name>/env_diagnostics/`：
+
+- `short_window_oracle_states.csv`：在同一 3 tick 窗口内比较 `MATCH_NOW`、`WAIT_1_THEN_MATCH`、`WAIT_2_THEN_MATCH`。
+- `fixed_interval_envelope.csv`：比较 fixed 1/2/3/4 tick 的 top/full 包络和规则 timing baseline。
+- `environment_research_value_summary.csv`：若 `research_value_ready=True`，说明环境支持动态匹配时机；若为 False，再回到 V2V 业务参数校准。
+
+当前 `main_env_diag_v3` 显示环境通过：best fixed interval 为 `fixed_2_tick_full_match`，相比 fixed1 full 约 +665 分；短窗口 oracle 中等待后匹配的 option 具备明显正收益。因此当前瓶颈主要在 RL 学习到这种等待机会，而不是环境缺少动态匹配价值。
