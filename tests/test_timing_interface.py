@@ -42,9 +42,9 @@ def test_tlc_wait_windows_convert_to_three_minute_ticks() -> None:
     env = make_env()
     rng = np.random.default_rng(7)
     generator = TLCManhattanScenarioGenerator(env.env_config, env.scale_config, data=None)  # type: ignore[arg-type]
-    high_pressure = {generator._sample_wait_ticks(1.6, rng) for _ in range(100)}
-    normal_pressure = {generator._sample_wait_ticks(1.0, rng) for _ in range(100)}
-    low_pressure = {generator._sample_wait_ticks(0.6, rng) for _ in range(100)}
+    high_pressure = {generator._sample_wait_ticks(2.45, rng) for _ in range(100)}
+    normal_pressure = {generator._sample_wait_ticks(2.05, rng) for _ in range(100)}
+    low_pressure = {generator._sample_wait_ticks(1.75, rng) for _ in range(100)}
     assert high_pressure <= {3, 4, 5, 6}
-    assert normal_pressure <= {5, 7, 9, 12, 15}
-    assert low_pressure <= {9, 12, 15, 18, 21}
+    assert normal_pressure <= {6, 8, 10, 13, 16}
+    assert low_pressure <= {12, 15, 18, 21, 25}

@@ -96,7 +96,7 @@ class TLCManhattanScenarioGenerator:
         min_raw_rows = self._minimum_raw_rows_for_fixed_demand()
         for _ in range(self.WINDOW_SEARCH_ATTEMPTS):
             day = str(rng.choice(available_days))
-            start_tick_day = int(rng.integers(0, latest_start + 1))
+            start_tick_day = self._sample_start_tick_day(rng, latest_start)
             rows = self.data.rows_for_window(day, start_tick_day, horizon)
             if best is None or len(rows) > len(best[2]):
                 best = (day, start_tick_day, rows)
@@ -114,6 +114,26 @@ class TLCManhattanScenarioGenerator:
                 raise RuntimeError("No TLC Manhattan trip rows found around fallback anchor row.")
             return day, start_tick_day, rows
         return best
+
+    def _sample_start_tick_day(self, rng: np.random.Generator, latest_start: int) -> int:
+        ticks_per_hour = max(1, int(round(60 / self.env_config.tick_minutes)))
+        horizon = self.scale_config.horizon_ticks
+        windows = [
+            (6 * ticks_per_hour, 8 * ticks_per_hour, "morning_peak"),
+            (10 * ticks_per_hour, 13 * ticks_per_hour, "midday"),
+            (15 * ticks_per_hour, 17 * ticks_per_hour, "evening_peak"),
+            (0, max(1, 6 * ticks_per_hour - horizon), "stable_off_peak"),
+            (20 * ticks_per_hour, self.data.ticks_per_day - horizon, "stable_off_peak"),
+        ]
+        candidates = [
+            (max(0, start), min(latest_start, end))
+            for start, end, _label in windows
+            if min(latest_start, end) >= max(0, start)
+        ]
+        if not candidates:
+            return int(rng.integers(0, latest_start + 1))
+        start, end = candidates[int(rng.integers(0, len(candidates)))]
+        return int(rng.integers(start, end + 1))
 
     def _minimum_raw_rows_for_fixed_demand(self) -> int:
         if self.scale_config.total_orders <= 0:
@@ -162,11 +182,24 @@ class TLCManhattanScenarioGenerator:
         for order_id, row in enumerate(rows.itertuples(index=False)):
             pressure = float(getattr(row, "zone_pressure"))
             arrival_tick = int(getattr(row, "pickup_tick_day") - start_tick_day)
+            phase = arrival_tick / max(1, self.scale_config.horizon_ticks)
+            temporal_pressure = self._temporal_pressure(pressure, phase)
             demand = float(np.clip(getattr(row, "demand_kwh_base") * rng.lognormal(0.0, 0.08), 3.0, 22.0))
-            max_wait = self._sample_wait_ticks(pressure, rng)
+            max_wait = self._sample_wait_ticks(temporal_pressure, rng)
+            if phase <= 0.18 or phase >= 0.78:
+                max_wait = max(2, max_wait - 1)
+            elif 0.48 <= phase <= 0.68:
+                max_wait += 2
             urgency_markup = 1.0 + max(0.0, 6 - max_wait) * 0.08 + 0.08 * max(0.0, pressure - 1.0)
             wtp = float(np.clip(getattr(row, "willingness_to_pay_proxy") * urgency_markup, 3.2, 12.0))
-            cancel_sensitivity = float(np.clip(rng.normal(0.15 + 0.035 * pressure + 0.02 * (max_wait <= 4), 0.025), 0.08, 0.32))
+            phase_cancel_shift = 0.04 if phase <= 0.18 or phase >= 0.78 else (-0.025 if 0.48 <= phase <= 0.68 else 0.0)
+            cancel_sensitivity = float(
+                np.clip(
+                    rng.normal(0.15 + 0.035 * temporal_pressure + 0.02 * (max_wait <= 4) + phase_cancel_shift, 0.025),
+                    0.08,
+                    0.34,
+                )
+            )
             orders.append(
                 Order(
                     order_id=order_id,
@@ -184,7 +217,13 @@ class TLCManhattanScenarioGenerator:
 
     def _generate_vehicles(self, start_tick_day: int, rng: np.random.Generator) -> list[Vehicle]:
         horizon = self.scale_config.horizon_ticks + self.scale_config.terminal_buffer_ticks
-        candidate_count = max(1, int(self.scale_config.candidate_vehicles * max(0.05, self.env_config.supply_scale)))
+        start_hour = (start_tick_day * self.env_config.tick_minutes) / 60.0
+        stable_off_peak = start_hour < 2.5 or start_hour >= 20.0
+        supply_multiplier = 1.35 if stable_off_peak else 1.0
+        candidate_count = max(
+            1,
+            int(self.scale_config.candidate_vehicles * max(0.05, self.env_config.supply_scale) * supply_multiplier),
+        )
         supply_rows = self.data.supply_rows_for_window(start_tick_day, self.scale_config.horizon_ticks)
         vehicles: list[Vehicle] = []
         for candidate_id in range(candidate_count):
@@ -202,8 +241,17 @@ class TLCManhattanScenarioGenerator:
                 destination_zone = int(source_row.pu_zone)
             if fleet:
                 online_duration = int(rng.integers(150, 290) / self.env_config.tick_minutes)
+                if stable_off_peak:
+                    online_duration = int(online_duration * rng.uniform(1.10, 1.25))
             else:
                 online_duration = int(rng.integers(70, 165) / self.env_config.tick_minutes)
+                join_phase = join_tick / max(1, self.scale_config.horizon_ticks)
+                if stable_off_peak:
+                    online_duration = int(online_duration * rng.uniform(1.45, 1.75))
+                elif join_phase <= 0.20 or join_phase >= 0.72:
+                    online_duration = max(4, int(online_duration * rng.uniform(0.45, 0.70)))
+                elif 0.45 <= join_phase <= 0.65:
+                    online_duration = int(online_duration * rng.uniform(1.05, 1.30))
             leave_tick = min(horizon, join_tick + online_duration)
             if leave_tick <= join_tick:
                 leave_tick = min(horizon, join_tick + 1)
@@ -235,17 +283,27 @@ class TLCManhattanScenarioGenerator:
         return vehicles
 
     def _sample_wait_ticks(self, pressure: float, rng: np.random.Generator) -> int:
-        if pressure >= 1.45:
+        # TLC Manhattan zone pressure is centered well above 1.0, so thresholds
+        # are calibrated against the empirical month rather than the synthetic grid.
+        if pressure >= 2.30:
             minute_choices = np.array([9, 12, 15, 18])
             probs = np.array([0.18, 0.30, 0.32, 0.20])
-        elif pressure <= 0.8:
-            minute_choices = np.array([27, 36, 45, 54, 63])
-            probs = np.array([0.18, 0.26, 0.26, 0.18, 0.12])
+        elif pressure <= 1.95:
+            minute_choices = np.array([36, 45, 54, 63, 75])
+            probs = np.array([0.16, 0.24, 0.28, 0.20, 0.12])
         else:
-            minute_choices = np.array([15, 21, 27, 36, 45])
+            minute_choices = np.array([18, 24, 30, 39, 48])
             probs = np.array([0.14, 0.22, 0.26, 0.22, 0.16])
         choices = np.maximum(1, np.ceil(minute_choices / self.env_config.tick_minutes).astype(int))
         return int(rng.choice(choices, p=probs / probs.sum()))
+
+    @staticmethod
+    def _temporal_pressure(base_pressure: float, phase: float) -> float:
+        early_deadline = 0.35 * np.exp(-((phase - 0.12) ** 2) / 0.012)
+        demand_burst = 0.42 * np.exp(-((phase - 0.36) ** 2) / 0.018)
+        stable_lull = -0.36 * np.exp(-((phase - 0.58) ** 2) / 0.022)
+        late_departure = 0.28 * np.exp(-((phase - 0.84) ** 2) / 0.014)
+        return float(np.clip(base_pressure + early_deadline + demand_burst + stable_lull + late_departure, 0.45, 2.7))
 
     @staticmethod
     def _sample_supply_row(rows: pd.DataFrame, rng: np.random.Generator):

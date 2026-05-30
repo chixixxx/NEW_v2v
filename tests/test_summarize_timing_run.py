@@ -76,3 +76,28 @@ def test_eval_action_distribution_prefers_policy_trace() -> None:
     assert rates["wait_rate"] == 1 / 3
     assert rates["top_batch_rate"] == 1 / 3
     assert rates["full_match_rate"] == 1 / 3
+
+
+def test_interval_distribution_reports_action_concentration() -> None:
+    rates = summarize_timing_run.eval_interval_distribution(
+        [
+            {"policy_name": "adaptive_interval_dqn", "interval_action_name": "dispatch_now"},
+            {"policy_name": "adaptive_interval_dqn", "interval_action_name": "delay_1_then_dispatch"},
+            {"policy_name": "adaptive_interval_dqn", "interval_action_name": "delay_2_then_dispatch"},
+            {"policy_name": "adaptive_interval_dqn", "interval_action_name": "delay_3_then_dispatch"},
+        ],
+        "adaptive_interval_dqn",
+    )
+    assert rates["interval_max_action_share"] == 0.25
+    assert rates["interval_mean_action_interval"] == 2.5
+
+
+def test_select_primary_policy_prefers_adaptive_interval() -> None:
+    policy = summarize_timing_run.select_primary_policy(
+        [
+            {"policy_name": "fixed_1_tick_full_match"},
+            {"policy_name": "dqn_adaptive_timing_legacy"},
+            {"policy_name": "adaptive_interval_dqn"},
+        ]
+    )
+    assert policy == "adaptive_interval_dqn"

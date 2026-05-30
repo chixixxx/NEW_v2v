@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from future_v2v.config import DispatchFrictionConfig, EnvironmentConfig, ScaleConfig
 from future_v2v.algorithms.baselines import WaitOpportunityTeacherPolicy, teacher_policies
+from future_v2v.algorithms.interval_dqn import execute_interval_action
 from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, OBSERVATION_NAMES, WAIT, FutureV2VTimingEnv
 from future_v2v.simulation.entities import ORDER_EXPIRED, ORDER_MATCHED, Order, Vehicle
 
@@ -99,6 +100,36 @@ def test_match_updates_order_vehicle_and_profit() -> None:
     assert env.vehicles[0].served_count == 1
     assert info["step_result"].accepted_count == 1
     assert info["step_result"].dispatch_mode == "match_top_batch"
+    assert reward > 0.0
+    assert info["step_result"].total_pickup_distance_km == env.orders[0].pickup_distance_km_est
+    assert info["step_result"].mean_pickup_distance_km > 0.0
+
+
+def test_episode_metrics_include_distance_adjusted_score() -> None:
+    env = make_env()
+    env.env_config = env.env_config.__class__(
+        **{
+            **env.env_config.__dict__,
+            "pickup_distance_penalty_per_km": 2.0,
+        }
+    )
+    install_single_order_vehicle(env, max_wait_ticks=2)
+    env.step(MATCH_FULL)
+    metrics = env.episode_metrics(policy_name="unit", seed=1)
+    assert metrics.total_pickup_distance_km == env.orders[0].pickup_distance_km_est
+    assert metrics.distance_adjusted_score == metrics.future_v2v_score - 2.0 * metrics.total_pickup_distance_km
+
+
+def test_interval_action_waits_then_dispatches_full_match() -> None:
+    env = make_env()
+    install_single_order_vehicle(env, max_wait_ticks=10)
+    _obs, reward, terminated, truncated, duration, trace = execute_interval_action(env, 2)
+    assert duration == 3
+    assert not terminated
+    assert not truncated
+    assert trace["interval_action_name"] == "delay_2_then_dispatch"
+    assert trace["final_dispatch_executed"] is True
+    assert env.orders[0].status == ORDER_MATCHED
     assert reward > 0.0
 
 

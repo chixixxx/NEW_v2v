@@ -1,53 +1,50 @@
-# Future V2V 自适应批量匹配研究方案
+# Future V2V 自适应匹配时机研究方案
 
 ## 研究定位
 
-本项目研究双边 V2V 平台中的自适应批量匹配时机：在电池健康、供需参与和城市时空压力约束下，由强化学习决定何时触发匹配，由约束优化器决定具体 CV-DV 匹配结果。
+本项目研究双边 V2V 平台中的自适应批量匹配时机：在电池健康、双边价格、车辆在线窗口和城市时空供需压力约束下，由强化学习选择匹配间隔，由同一个约束优化器决定具体的 CV-DV 匹配边。
 
-平台中的 CV 是需要获得有效充电量的需求车辆，DV 是愿意输出电量并获得补偿的供给车辆。订单需求、OD 热点、行程时间和价格强度由 TLC Manhattan 黄出租数据校准；V2V 专属属性，包括需求电量、等待窗口、SOC、保留电量、报价、在线时间和 fleet/private 差异，由业务模型生成。
+当前主线不再把“固定 2 步优于固定 1 步”当作动态匹配成立条件。更合理的目标是：同一次仿真中同时出现高压临期、需求爆发、低压稳定、车辆即将离池、区域错配等状态，使不同匹配步长在不同状态桶中各有优势，主算法学习按状态切换。
 
-核心范式：
+## 主控制问题
 
-```text
-强化学习决定 WAIT / MATCH_TOP_BATCH / MATCH_FULL
-约束优化器决定订单-车辆匹配边
-电池健康、双边价格和交易摩擦共同决定平台收益
-```
-
-## MDP 定义
-
-每个决策 tick 为 3 分钟。环境观测是低维聚合状态，包括活跃订单、等待比例、取消风险、可用车辆、健康可供电量、供需压力、可行边密度、候选边收益和电池健康约束紧张度。
-
-动作空间固定为：
+环境的底层步长仍是 3 分钟。主算法采用匹配间隔动作：
 
 ```text
-0 = WAIT
-1 = MATCH_TOP_BATCH
-2 = MATCH_FULL
+0 = 立即匹配
+1 = 延迟 1 步后匹配
+2 = 延迟 2 步后匹配
+3 = 延迟 3 步后匹配
 ```
 
-- `WAIT`：推进一个 tick，不触发匹配；订单可能继续等待、取消或过期，车辆也可能离池。
-- `MATCH_TOP_BATCH`：先求完整约束匹配，再只执行最高价值的一部分匹配，是主控制动作。
-- `MATCH_FULL`：执行完整正收益匹配，主要作为 fixed/full 诊断基线，也允许 DQN 在极端状态下选择。
+动作执行期间会累计等待、取消、过期、车辆离池、候选边变化和最终匹配收益。窗口结束时统一调用完整正收益匹配。第一版先只学习“何时匹配”，不同时学习“匹配多少”，避免控制目标发散。旧三动作方法 `WAIT / MATCH_TOP_BATCH / MATCH_FULL` 保留为诊断基线，名称为 `dqn_adaptive_timing_legacy`。
 
-## V2V 价格与电池健康
+## 环境主线
 
-`order.demand_kwh` 表示 CV 实际需要获得的有效电量。由于传输损耗，DV 输出电量为：
+主环境为 `tlc_manhattan`：
+
+- 订单到达、OD 热点、行程时长和价格强度由 TLC 黄出租数据校准。
+- 路网为 Manhattan taxi zone 区域层级，不使用街道路段级 OSM。
+- 车辆供给不直接复用同 tick 出租车，使用历史 dropoff 和闲置压力校准入池区域，再生成 SOC、保留电量、报价和在线时长。
+- 合成 16 区网格只作为 smoke/test fallback。
+
+环境会刻意保留 V2V 业务异质性：急单等待短、稳定窗口等待长、私人车在线窗口更短、车队车更稳定、区域错配会影响接驾时间和接驾距离。
+
+## 双边价格与电池健康
+
+`order.demand_kwh` 表示 CV 实际获得的有效电量。DV 需要输出：
 
 ```text
 donor_output_kwh = demand_kwh / transfer_efficiency
 ```
 
-默认 `transfer_efficiency=0.90`，约 10% 能量以损耗形式消失。DV 可供电量由 reserve 和最低健康 SOC 共同约束：
+默认 `transfer_efficiency = 0.90`。DV 可供电量为：
 
 ```text
-available_energy =
-  current_soc_kwh - max(reserve_kwh, donor_min_soc_ratio * battery_capacity_kwh)
+current_soc_kwh - max(reserve_kwh, donor_min_soc_ratio * battery_capacity_kwh)
 ```
 
-默认 `donor_min_soc_ratio=0.25`，防止供给车辆被放电到过低 SOC。
-
-边级平台毛收益拆成可解释的双边经济结构：
+平台边际收益拆分为：
 
 ```text
 buyer_payment
@@ -56,17 +53,11 @@ buyer_payment
 - seller_time_cost
 ```
 
-卖方补偿拆为：
+卖方补偿包括基础电能成本、电池退化成本和服务溢价。默认 `degradation_cost_per_kwh = 0.08`，单独统计，不混入基础电价。
 
-```text
-energy_cost + degradation_cost + service_premium
-```
+## 交易摩擦
 
-其中 `degradation_cost_per_kwh=0.08` 单独统计，不混入基础电价。
-
-## Dispatch Friction
-
-V2V dispatch 不只是算法重算，还包含报价、通知、路线承诺、SOC 承诺、支付和用户确认。因此正式环境采用 decomposed transaction cost：
+正式口径使用可解释的交易摩擦，不使用硬性的连续派单惩罚：
 
 ```text
 dispatch_friction_cost =
@@ -76,61 +67,28 @@ dispatch_friction_cost =
   + full_mode_extra_cost
 ```
 
-默认值：
+这些成本解释为报价、通知、路线承诺、SOC 承诺、支付确认和交易协调。敏感性评估会同时输出 `no_refresh_friction`、`common_fixed_cost` 和 `no_dispatch_friction`，用于判断结论是否过度依赖摩擦设定。
 
-```text
-setup_cost = 18.0
-pair_coordination_cost = 0.75 * matched_pairs
-full_mode_extra_cost = 0.20 * matched_pairs, only for MATCH_FULL
-refresh_cost = 16.0 * exp(-ticks_since_last_dispatch / 1.5)
-```
+## 距离指标
 
-`MATCH_FULL` 更贵不是因为计算更贵，而是因为它触发更多低边际 CV-DV 交易协调。`refresh_cost` 是平滑衰减的报价刷新摩擦，不是硬性的连续派单惩罚。
+候选边、匹配结果和单轮指标新增估计接驾距离：
 
-## 算法路线
+- `total_pickup_distance_km`
+- `mean_pickup_distance_km`
+- `pickup_distance_per_served_order`
+- `distance_adjusted_score`
 
-第一版采用 Double DQN 学习匹配时机和批量强度。DQN 不直接选择具体订单-车辆边，避免动作空间过大；边选择由 Hungarian assignment 和业务约束完成。
+距离第一阶段是辅助指标，不替代主得分。若某策略靠明显更长距离换取利润，报告必须同时解释利润、服务率和接驾距离的权衡。
 
-训练采用并行环境采样、单进程 learner：
+## 环境验收
 
-- 多个 rollout worker 独立运行 episode。
-- worker 返回 transitions、episode metrics 和动作分布。
-- 主进程维护 replay buffer、DQN 网络和 optimizer。
-- checkpoint 按 validation seeds 上的 `future_v2v_score_mean` 选择。
+环境是否有研究价值，优先看匹配步长多样性：
 
-teacher replay prefill 只输出同一动作空间下的 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`，不直接输出匹配边，避免模仿学习接口和 RL 控制接口不一致。
+- 固定 2 步占优比例低于 70%。
+- 至少两个不同匹配步长在不同状态桶中成为最佳。
+- 1 步在高临期或车辆离池桶中有优势。
+- 2 步在需求爆发桶中有优势。
+- 3 步只在低压稳定桶中有优势，不能全局压倒 2 步。
+- 4 步不能大面积最优，否则等待成本过弱。
 
-## 对比基线与可信性检查
-
-所有基线使用同一仿真器、同一候选图、同一电池健康约束和同一约束优化器：
-
-- `fixed_1_tick_full_match`
-- `fixed_2_tick_full_match`
-- `fixed_1_tick_top_batch`
-- `queue_threshold_top_batch`
-- `deadline_trigger_top_batch`
-- `supply_demand_pressure_top_batch`
-- `short_lookahead_top_batch`
-- `dqn_adaptive_timing`
-
-评估额外运行 friction sensitivity：
-
-- `decomposed_transaction_cost`：正式口径。
-- `no_refresh_friction`：检查动态优势是否依赖短时间重复 dispatch 成本。
-- `common_fixed_cost`：检查 full/top 差异是否过度依赖 full extra cost。
-- `no_dispatch_friction`：诊断完全无交易摩擦时是否自然退化为高频匹配。
-
-主结论必须来自 `decomposed_transaction_cost`，并且 `no_refresh_friction` 下仍保留正向 paired delta，才认为环境具备可信动态匹配区分度。
-## DQN 可学习性增强
-
-为避免 DQN 在交易摩擦环境中学成高频 `MATCH_TOP_BATCH`，观测增加 `ticks_since_last_dispatch`、top/full 预估摩擦、time-of-day bucket、临期订单占比和 projected service risk。
-
-step reward 继续以即时平台利润为主，但 service-risk shaping 采用 delta potential：比较动作前后服务风险潜势是否改善，而不是每一步惩罚“当前服务率低”。这样 WAIT 不会因为当前累计服务率偏低而天然吃亏。
-
-WAIT 动作额外使用 one-step opportunity bonus：若 WAIT 后候选边收益增量能够覆盖过期、取消、等待和刷新摩擦风险，则给轻量正奖励；若临期损失大，则不加 bonus。
-
-teacher replay prefill 只使用同一动作空间，但强化 `fixed_2_tick_full_match` 和 deadline rescue 样本，让 DQN 明确学习何时等待、何时用 `MATCH_FULL` 兜住临期服务风险。
-
-teacher replay prefill 还加入 `WaitOpportunityTeacherPolicy`，专门提供最近刚 dispatch、临期压力低、刷新摩擦高或短窗口候选收益预计提升时的 WAIT 样本。
-
-checkpoint selection 使用分层 validation manifest 覆盖 `morning_peak / midday / evening_peak / off_peak`，并按 `0.85 * mean_score + 0.15 * worst_bucket_score - off_peak_floor_penalty` 选择 checkpoint，减少模型在 off-peak stress 窗口突然崩盘的风险，同时避免 worst bucket 权重过强导致策略过度保守。
+主算法验收看动作分布、平均匹配间隔、相对固定 1 步的收益，以及与最佳固定步长的差距是否缩小。

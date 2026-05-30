@@ -1,89 +1,53 @@
-# Future V2V Benchmark Environment 说明
+# Future V2V 仿真环境说明
 
-## 路网与数据源
+## 路网与数据
 
-默认主环境是 `tlc_manhattan`。
+默认主环境是 `tlc_manhattan`。订单时空分布来自 TLC 黄出租月度数据，区域为 Manhattan taxi zone。项目不使用真实街道路段级路网，也不声称黄出租订单就是 V2V 交易；出租车数据只用于校准真实城市需求、OD 热点、行程时长和价格强度。
 
-- 订单到达、OD 热点、行程时长和价格强度来自 NYC TLC 黄出租月度数据。
-- 路网层级使用 Manhattan taxi zone，不使用街道路段级 OSM，也不把 16 区合成网格作为主环境。
-- travel time 使用同月黄出租 OD 在对应 60 分钟时段内的中位行程时间。
-- 缺失 OD 回退到同 OD 全时段中位数、同 origin 中位数或全局中位数。
-- 黄出租数据只作为未来 V2V 需求与城市移动模式的校准源，不直接解释为 V2V 交易。
+区域旅行时间优先使用同月黄出租 OD 的分时段中位行程时长。缺失 OD 使用同源区域、全局中位数等回退。内部会把 TLC `LocationID` 映射成连续区域索引。
 
-合成 16 区网格只作为 smoke/test fallback。
+## 时间与规模
 
-## 时间粒度与规模
+默认 1 步为 3 分钟：
 
-默认 1 tick = 3 分钟。
+- `main`: 80 步 + 14 步缓冲，约 4 小时 + 42 分钟。
+- `smoke`: 60 步 + 8 步缓冲，约 3 小时 + 24 分钟。
+- `service_kwh_per_tick = 2.7`，约等于 54 kW，实际还受最大放电功率约束。
 
-- `main`: 80 ticks + 14 terminal buffer，约 4 小时 + 42 分钟。
-- `smoke`: 60 ticks + 8 terminal buffer，约 3 小时 + 24 分钟。
-- `service_kwh_per_tick=2.7`，约等于 54 kW；实际服务时长还会被 `max_discharge_power_kw=50.0` 约束。
+新增 `configs/tick2_diagnostic.json` 用于 2 分钟粒度诊断：`main` 为 120 步，保持约 4 小时时间窗，单步服务电量调整为 1.8 kWh。
 
-`main` 默认压力：
+## 订单与车辆
 
-- 1600 单。
-- 1900 候选车辆。
-- 基础入池率 0.36。
-- `supply_scale=0.55`。
-- 每单候选车辆上限 20。
-- top-batch 容量为活跃订单的 55%，并限制在 8 到 80 之间。
+订单按区域和时间窗口生成：
 
-## Dispatch Friction
+- 到达时间来自出租车 pickup 时间。
+- 起点来自 `PULocationID`，终点来自 `DOLocationID`。
+- 电量需求、愿付价、最大等待和取消敏感度由 V2V 业务模型生成。
+- 高压窗口等待较短，低压稳定窗口等待更宽。
 
-正式口径不再使用硬阈值 `rapid_dispatch_penalty`，也不再给 `MATCH_TOP_BATCH` 和 `MATCH_FULL` 两套互不相干的固定成本。每次 dispatch 扣除可解释的 V2V 交易摩擦：
+车辆按区域供给分布生成：
 
-```text
-dispatch_friction_cost =
-  setup_cost
-  + pair_coordination_cost
-  + refresh_cost
-  + full_mode_extra_cost
-```
+- 入池区域由历史 dropoff 和闲置压力校准。
+- SOC 使用偏中高电量的 Beta 分布。
+- 报价拆成基础电能成本和服务溢价。
+- 私人车在线时间较短，车队车在线时间更稳定。
+- 同 tick 需求不会直接泄露给供给生成。
 
-默认配置：
+## 时空异质性
 
-```text
-setup_cost = 18.0
-pair_coordination_cost = 0.75 * matched_pairs
-full_mode_extra_cost = 0.20 * matched_pairs, only for MATCH_FULL
-refresh_cost = 16.0 * exp(-ticks_since_last_dispatch / 1.5)
-```
+环境会在同一轮仿真中形成多类状态：
 
-含义：
+- 高压临期窗口：短等待、高取消风险、车辆离池压力高。
+- 需求爆发窗口：未来 1 到 2 步订单和候选边增长明显。
+- 低压稳定窗口：订单等待宽，车队车辆稳定。
+- 区域错配窗口：需求热点和供给热点不同，等待可能改善候选图，也可能增加接驾距离。
+- 车辆离池窗口：私人车剩余在线时间短，过度等待会损失供给。
 
-- `setup_cost` 表示报价、清算、通知和平台撮合的基础交易启动成本。
-- `pair_coordination_cost` 表示每对 CV-DV 交易的沟通、路线承诺和确认成本。
-- `full_mode_extra_cost` 表示 full match 触达更多低边际交易带来的额外协调成本，而不是算法计算更贵。
-- `refresh_cost` 表示短时间内反复刷新报价和承诺的摩擦，采用平滑衰减，不使用 1 tick 硬惩罚。
+这些机制都来自 V2V 业务逻辑，不通过任意硬惩罚制造差异。
 
-`platform_profit` 的 episode 口径为：
+## 电池健康
 
-```text
-accepted_realized_profit - dispatch_friction_cost
-```
-
-## TLC 到 V2V 的改造
-
-- `arrival_tick` 来自出租车 pickup 时间在 episode 窗口内的位置。
-- `origin_zone` 来自 `PULocationID`，表示需求发生区域。
-- `destination_zone` 来自 `DOLocationID`，解释为服务后车辆可能靠近的活动区域。
-- `demand_kwh` 由 trip distance、duration 和业务扰动生成，控制在 V2V 合理电量区间。
-- `willingness_to_pay_per_kwh` 由 total amount 与电量需求校准，并加上下限约束。
-- `max_wait_ticks` 不直接使用出租车等待语义，而是按时段压力生成分钟级等待窗口后转成 tick。
-- 车辆供给不直接使用同 tick 出租车作为供电车辆，而是用历史 dropoff/idle 空间分布校准入池区域，再生成 SOC、报价、在线时间和保留电量。
-
-## 电池健康与双边价格
-
-CV 订单需要获得有效电量；DV 因传输效率损耗必须输出更多电量：
-
-```text
-delivered_kwh = order.demand_kwh
-donor_output_kwh = delivered_kwh / transfer_efficiency
-energy_loss_kwh = donor_output_kwh - delivered_kwh
-```
-
-默认电池健康配置：
+默认参数：
 
 ```text
 donor_min_soc_ratio = 0.25
@@ -92,48 +56,28 @@ degradation_cost_per_kwh = 0.08
 max_discharge_power_kw = 50.0
 ```
 
-候选边必须满足：
+候选边必须满足接驾时间、电量、最低 SOC、在线窗口、正收益等约束。若放电后低于健康阈值，该边不可行。
 
-- pickup 时间不超过 `pickup_cap_minutes`。
-- DV 输出电量不超过健康可供电量。
-- DV 放电后 SOC 不低于 `max(reserve_kwh, donor_min_soc_ratio * capacity)`。
-- 车辆剩余在线时间覆盖 pickup 和服务承诺。
-- 期望利润为正。
+## 交易摩擦
 
-边级收益拆分：
+正式口径为可分解交易摩擦：
 
 ```text
-buyer_payment = delivered_kwh * willingness_to_pay_per_kwh
-seller_reimbursement =
-  donor_output_kwh * energy_cost_per_kwh
-  + donor_output_kwh * degradation_cost_per_kwh
-  + donor_output_kwh * service_premium_per_kwh
-platform_margin = buyer_payment - seller_reimbursement - pickup_cost - seller_time_cost
+setup_cost = 18.0
+pair_coordination_cost = 0.75 * matched_pairs
+full_mode_extra_cost = 0.20 * matched_pairs
+refresh_cost = 16.0 * exp(-ticks_since_last_dispatch / 1.5)
 ```
 
-## 环境健康目标
-
-正式验收看 `decomposed_transaction_cost` 口径：
-
-- `best_mean_batch_interval` 在 1.3-2.2 ticks。
-- best policy 相对 `fixed_1_tick_full_match` 的 paired score delta 大于 500。
-- `fixed_2_tick_full_match` 相对 fixed1 的 service drop 在 4%-10%。
-- `fixed_1_tick_top_batch` capacity bind rate 在 25%-60%。
-- `no_refresh_friction` sensitivity 下 paired score delta 仍大于 200，否则标记 `friction_sensitive_risk=True`。
-- `no_dispatch_friction` 只作为诊断，不要求动态策略胜出。
-- `donor_soc_violation_count = 0`。
-- `energy_loss_rate` 约 8%-12%。
-- `platform_margin_per_served_order > 0`。
+`full_mode_extra_cost` 表示触达更多低边际交易的额外协调成本，不表示算法计算成本。`refresh_cost` 是平滑衰减的报价刷新摩擦，不是 1 步硬惩罚。
 
 ## 输出诊断
 
-评估报告输出：
+新增环境诊断输出：
 
-- `eval_summary.csv`：主指标和 episode 聚合。
-- `timing_policy_comparison.csv`：动态匹配区分度。
-- `paired_policy_delta_summary.csv`：相对 `fixed_1_tick_full_match` 的同场景差值和 win rate。
-- `friction_sensitivity_summary.csv`：不同 friction 口径下的 robust 性。
-- `environment_acceptance_summary.csv`：环境是否满足 dynamic timing stress benchmark 和 friction robust 验收条件。
-- `action_trace_by_policy.csv`：每 tick 动作与状态。
-- `dispatch_trace_by_policy.csv`：每次 dispatch 的收益、电量、SOC、补偿和 friction 拆分。
-- `wait_tradeoff_trace.csv`：WAIT 后新增候选边、收益和取消/过期损失。
+- `interval_bucket_envelope.csv`：不同状态桶内的最佳策略。
+- `interval_diversity_summary.csv`：最佳步长分布、固定 2 步占优比例、自适应机会得分。
+- `pickup_distance_summary.csv`：各策略接驾距离对比。
+- `distance_adjusted_eval_summary.csv`：距离修正后的评估表。
+
+环境通过的重点不是固定 2 步是否赢固定 1 步，而是不同状态桶是否出现不同最佳步长。

@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from future_v2v.algorithms.baselines import TimingPolicy, default_baselines, policy_from_name, run_policy_episode
 from future_v2v.algorithms.dqn import DQNTimingAgent
+from future_v2v.algorithms.interval_dqn import AdaptiveIntervalDQNAgent
 from future_v2v.config import DispatchFrictionConfig, ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
 from future_v2v.metrics import summarize_metrics, write_csv
@@ -88,7 +89,12 @@ def run_train(
     obs, _ = env.reset(seed=seed)
     train_episodes = episodes or config.scale(scale_name).train_episodes
     worker_count = max(1, int(rollout_workers or config.training.rollout_workers))
-    agent = DQNTimingAgent(obs_dim=len(obs), training_config=config.training)
+    use_interval = config.environment.action_space == "adaptive_interval"
+    agent = (
+        AdaptiveIntervalDQNAgent(obs_dim=len(obs), training_config=config.training)
+        if use_interval
+        else DQNTimingAgent(obs_dim=len(obs), training_config=config.training)
+    )
     history = agent.train(
         env_factory,
         episodes=train_episodes,
@@ -99,13 +105,17 @@ def run_train(
     )
     write_csv(run_dir / "train" / "train_history.csv", history)
     write_csv(run_dir / "train" / "validation_history.csv", agent.validation_history)
-    write_csv(run_dir / "train" / "action_distribution.csv", _action_distribution_rows(history))
-    agent.save(run_dir / "train" / "dqn_timing_agent.pt")
+    if use_interval:
+        write_csv(run_dir / "train" / "interval_action_distribution.csv", _interval_action_distribution_rows(history))
+        agent.save(run_dir / "train" / "adaptive_interval_dqn_agent.pt")
+    else:
+        write_csv(run_dir / "train" / "action_distribution.csv", _action_distribution_rows(history))
+        agent.save(run_dir / "train" / "dqn_timing_agent.pt")
     write_markdown_report(
         run_dir / "train" / "train_report.md",
         title=f"DQN Timing Training ({scale_name})",
         summary_lines=[
-            "训练目标是学习 WAIT / MATCH_TOP_BATCH / MATCH_FULL 时机，匹配边仍由约束优化器决定。",
+            "训练目标是学习匹配间隔；匹配边仍由约束优化器决定。",
             f"episodes={train_episodes}, replay_prefill={config.training.teacher_prefill_episodes}, rollout_workers={worker_count}",
             f"validation_episodes={config.training.validation_episodes}, checkpoint_metric={config.training.checkpoint_selection_metric}",
         ],
@@ -125,9 +135,13 @@ def run_eval(
     count = eval_episodes or scale.eval_episodes
     manifest_rows = _load_or_build_eval_manifest(config, scale_name, run_dir, seed=seed, count=count)
     policy_specs: list[tuple[str, str]] = [("baseline", policy.name) for policy in default_baselines()]
-    checkpoint = run_dir / "train" / "dqn_timing_agent.pt"
-    if checkpoint.exists():
-        policy_specs.append(("dqn", str(checkpoint)))
+    interval_checkpoint = run_dir / "train" / "adaptive_interval_dqn_agent.pt"
+    legacy_checkpoint = run_dir / "train" / "dqn_timing_agent.pt"
+    if config.environment.action_space == "adaptive_interval":
+        if interval_checkpoint.exists():
+            policy_specs.append(("interval_dqn", str(interval_checkpoint)))
+    elif legacy_checkpoint.exists():
+        policy_specs.append(("dqn", str(legacy_checkpoint)))
     results = _evaluate_policy_specs(
         config,
         scale_name,
@@ -140,6 +154,7 @@ def run_eval(
     action_rows = [row for result in results for row in result["action_trace"]]
     dispatch_rows = [row for result in results for row in result["dispatch_trace"]]
     wait_rows = [row for result in results for row in result["wait_tradeoff_trace"]]
+    interval_rows = [row for result in results for row in result.get("interval_trace", [])]
     detail_rows = [metric.to_row() for metric in all_metrics]
     summary_rows = summarize_metrics(all_metrics)
     paired_rows = _paired_policy_delta_summary(all_metrics)
@@ -158,15 +173,18 @@ def run_eval(
         summary_rows,
         dispatch_rows,
         action_rows,
+        interval_rows,
         paired_rows,
         sensitivity_rows,
     )
     write_csv(run_dir / "eval" / "episode_metrics.csv", detail_rows)
     write_csv(run_dir / "eval" / "eval_summary.csv", summary_rows)
+    write_csv(run_dir / "eval" / "distance_adjusted_eval_summary.csv", _distance_adjusted_summary_rows(summary_rows))
     write_csv(run_dir / "eval" / "paired_policy_delta_summary.csv", paired_rows)
     write_csv(run_dir / "eval" / "action_trace_by_policy.csv", action_rows)
     write_csv(run_dir / "eval" / "dispatch_trace_by_policy.csv", dispatch_rows)
     write_csv(run_dir / "eval" / "wait_tradeoff_trace.csv", wait_rows)
+    write_csv(run_dir / "eval" / "interval_policy_trace.csv", interval_rows)
     write_csv(run_dir / "eval" / "timing_policy_comparison.csv", comparison_rows)
     write_csv(run_dir / "eval" / "friction_sensitivity_summary.csv", sensitivity_rows)
     write_csv(run_dir / "eval" / "environment_acceptance_summary.csv", acceptance_rows)
@@ -247,6 +265,38 @@ def _run_eval_task(
         obs, _ = _reset_eval_env(env, scenario)
         policy = DQNTimingAgent.load(Path(value), config.training)
         _ = obs
+    elif kind == "interval_dqn":
+        obs, _ = _reset_eval_env(env, scenario)
+        policy = AdaptiveIntervalDQNAgent.load(Path(value), config.training)
+        interval_trace = policy.run_eval_episode(env, obs)
+        metrics = env.episode_metrics(policy_name=policy.name, seed=seed)
+        return {
+            "metrics": metrics,
+            "action_trace": _tag_trace_rows(
+                env.action_trace,
+                policy_name=metrics.policy_name,
+                seed=seed,
+                scenario_id=metrics.scenario_id,
+            ),
+            "dispatch_trace": _tag_trace_rows(
+                env.dispatch_trace,
+                policy_name=metrics.policy_name,
+                seed=seed,
+                scenario_id=metrics.scenario_id,
+            ),
+            "wait_tradeoff_trace": _tag_trace_rows(
+                env.wait_tradeoff_trace,
+                policy_name=metrics.policy_name,
+                seed=seed,
+                scenario_id=metrics.scenario_id,
+            ),
+            "interval_trace": _tag_trace_rows(
+                interval_trace,
+                policy_name=metrics.policy_name,
+                seed=seed,
+                scenario_id=metrics.scenario_id,
+            ),
+        }
     else:
         raise ValueError(f"unknown policy spec kind: {kind}")
     metrics = _run_policy_episode_for_scenario(env, policy, scenario=scenario)
@@ -270,6 +320,7 @@ def _run_eval_task(
             seed=seed,
             scenario_id=metrics.scenario_id,
         ),
+        "interval_trace": [],
     }
 
 
@@ -325,6 +376,36 @@ def _action_distribution_rows(history: list[dict[str, float | int]]) -> list[dic
         }
         for row in history
     ]
+
+
+def _interval_action_distribution_rows(history: list[dict[str, float | int]]) -> list[dict[str, object]]:
+    return [
+        {
+            "episode": row["episode"],
+            "dispatch_now_count": row.get("interval_dispatch_now_count", 0),
+            "delay_1_count": row.get("interval_delay_1_count", 0),
+            "delay_2_count": row.get("interval_delay_2_count", 0),
+            "delay_3_count": row.get("interval_delay_3_count", 0),
+            "delay_2_share": row.get("interval_delay_2_share", 0.0),
+        }
+        for row in history
+    ]
+
+
+def _distance_adjusted_summary_rows(summary_rows: list[dict[str, float | str]]) -> list[dict[str, float | str]]:
+    fields = [
+        "policy_name",
+        "future_v2v_score_mean",
+        "distance_adjusted_score_mean",
+        "platform_profit_mean",
+        "service_rate_mean",
+        "total_pickup_distance_km_mean",
+        "pickup_distance_per_served_order_mean",
+        "mean_pickup_distance_km_mean",
+    ]
+    rows = [{field: row.get(field, "") for field in fields} for row in summary_rows]
+    rows.sort(key=lambda row: float(row.get("distance_adjusted_score_mean") or 0.0), reverse=True)
+    return rows
 
 
 def _paired_policy_delta_summary(
@@ -635,6 +716,7 @@ def _environment_acceptance_summary(
     summary_rows: list[dict[str, float | str]],
     dispatch_rows: list[dict[str, object]],
     action_rows: list[dict[str, object]],
+    interval_rows: list[dict[str, object]],
     paired_rows: list[dict[str, object]],
     sensitivity_rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -663,9 +745,27 @@ def _environment_acceptance_summary(
     fixed_1_expired = float(fixed_1.get("expired_rate_mean", 0.0))
     best_score_delta = float(best.get("future_v2v_score_mean", 0.0)) - fixed_1_score
     fixed_1_top_bind_rate = _capacity_bind_rate(dispatch_by_policy.get("fixed_1_tick_top_batch", []))
-    dqn_actions = action_counts.get("dqn_adaptive_timing", {})
-    dqn_total = sum(dqn_actions.values())
-    dqn_top_batch_rate = dqn_actions.get("match_top_batch", 0) / max(1, dqn_total) if dqn_total else 0.0
+    interval_actions: dict[str, int] = {}
+    for row in interval_rows:
+        if str(row.get("policy_name", "")) != "adaptive_interval_dqn":
+            continue
+        action = str(row.get("interval_action_name", ""))
+        interval_actions[action] = interval_actions.get(action, 0) + 1
+    interval_total = sum(interval_actions.values())
+    interval_delay_sum = (
+        interval_actions.get("delay_1_then_dispatch", 0)
+        + 2 * interval_actions.get("delay_2_then_dispatch", 0)
+        + 3 * interval_actions.get("delay_3_then_dispatch", 0)
+    )
+    interval_mean_delay = interval_delay_sum / max(1, interval_total) if interval_total else 0.0
+    interval_mean_action_interval = 1.0 + interval_mean_delay
+    interval_max_action_share = max(interval_actions.values(), default=0) / max(1, interval_total) if interval_total else 0.0
+    interval_delayed_action_rate = (
+        interval_total - interval_actions.get("dispatch_now", 0)
+    ) / max(1, interval_total) if interval_total else 0.0
+    legacy_actions = action_counts.get("dqn_adaptive_timing_legacy", {})
+    legacy_total = sum(legacy_actions.values())
+    legacy_top_batch_rate = legacy_actions.get("match_top_batch", 0) / max(1, legacy_total) if legacy_total else 0.0
     best_interval = float(best.get("mean_batch_interval_mean", 0.0))
     paired_best = paired_rows[0] if paired_rows else {}
     paired_best_delta = float(paired_best.get("score_delta_mean", 0.0))
@@ -678,7 +778,14 @@ def _environment_acceptance_summary(
         and 1.30 <= best_interval <= 2.20
     )
     friction_robust_ready = bool(baseline_ready and no_refresh_delta >= 200.0)
-    dqn_ready = bool(dqn_total and dqn_top_batch_rate >= 0.20)
+    interval_action_ready = bool(
+        interval_total
+        and interval_max_action_share <= 0.75
+        and 1.20 <= interval_mean_action_interval <= 2.20
+    )
+    legacy_action_ready = bool(legacy_total and legacy_top_batch_rate >= 0.20)
+    learned_policy_total = interval_total + legacy_total
+    dqn_ready = bool(interval_action_ready or legacy_action_ready)
     return [
         {
             "best_policy": best.get("policy_name", ""),
@@ -688,7 +795,11 @@ def _environment_acceptance_summary(
             "fixed2_service_drop_vs_fixed1": fixed_1_service - fixed_2_service,
             "fixed1_top_batch_score_gap_ratio": top_batch_gap_ratio,
             "fixed1_top_batch_capacity_bind_rate": fixed_1_top_bind_rate,
-            "dqn_top_batch_action_rate": dqn_top_batch_rate,
+            "adaptive_interval_action_count": interval_total,
+            "adaptive_interval_mean_action_interval": interval_mean_action_interval,
+            "adaptive_interval_delayed_action_rate": interval_delayed_action_rate,
+            "adaptive_interval_max_action_share": interval_max_action_share,
+            "legacy_dqn_top_batch_action_rate": legacy_top_batch_rate,
             "paired_best_policy": paired_best.get("policy_name", ""),
             "paired_best_score_delta_mean": paired_best_delta,
             "paired_best_score_win_rate": paired_best.get("score_win_rate", 0.0),
@@ -697,7 +808,9 @@ def _environment_acceptance_summary(
             "friction_robust_ready": friction_robust_ready,
             "friction_sensitive_risk": bool(no_refresh_delta < 200.0),
             "dqn_action_ready": dqn_ready,
-            "dynamic_timing_ready": bool(friction_robust_ready and (dqn_ready or not dqn_total)),
+            "adaptive_interval_action_ready": interval_action_ready,
+            "legacy_dqn_action_ready": legacy_action_ready,
+            "dynamic_timing_ready": bool(friction_robust_ready and (dqn_ready or not learned_policy_total)),
         }
     ]
 

@@ -49,6 +49,7 @@ class ConstrainedMatcher:
         battery = self.env_config.battery_health
         pickup_ticks = self.network.travel_ticks(vehicle.current_zone, order.origin_zone, tick)
         pickup_minutes = pickup_ticks * self.network.minutes_per_tick
+        pickup_distance_km_est = self.network.pickup_distance_km_est(vehicle.current_zone, order.origin_zone, tick)
         delivered_kwh = order.demand_kwh
         donor_output_kwh = delivered_kwh / max(1e-6, battery.transfer_efficiency)
         energy_loss_kwh = donor_output_kwh - delivered_kwh
@@ -85,6 +86,7 @@ class ConstrainedMatcher:
             vehicle_id=vehicle.vehicle_id,
             pickup_ticks=pickup_ticks,
             pickup_minutes=pickup_minutes,
+            pickup_distance_km_est=pickup_distance_km_est,
             service_ticks=service_ticks,
             total_commitment_ticks=commitment_ticks,
             delivered_kwh=delivered_kwh,
@@ -189,6 +191,7 @@ class ConstrainedMatcher:
                 order.matched_vehicle_id = vehicle.vehicle_id
                 order.match_tick = tick
                 order.pickup_minutes = edge.pickup_minutes
+                order.pickup_distance_km_est = edge.pickup_distance_km_est
                 order.commitment_ticks = edge.total_commitment_ticks
                 order.realized_profit = realized_profit
                 order.buyer_payment = edge.buyer_payment
@@ -221,6 +224,7 @@ class ConstrainedMatcher:
                     expected_profit=edge.expected_profit,
                     realized_profit=realized_profit,
                     pickup_minutes=edge.pickup_minutes,
+                    pickup_distance_km_est=edge.pickup_distance_km_est,
                     total_commitment_ticks=edge.total_commitment_ticks,
                     accepted=accepted,
                     delivered_kwh=edge.delivered_kwh,

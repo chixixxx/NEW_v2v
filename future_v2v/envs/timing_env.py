@@ -208,6 +208,8 @@ class FutureV2VTimingEnv:
             result.platform_profit = float(result.gross_dispatch_profit - result.dispatch_friction_cost)
             if accepted:
                 result.mean_pickup_minutes = float(np.mean([match.pickup_minutes for match in accepted]))
+                result.total_pickup_distance_km = float(sum(match.pickup_distance_km_est for match in accepted))
+                result.mean_pickup_distance_km = float(np.mean([match.pickup_distance_km_est for match in accepted]))
                 result.mean_commitment_ticks = float(np.mean([match.total_commitment_ticks for match in accepted]))
                 result.buyer_payment = float(sum(match.buyer_payment for match in accepted))
                 result.seller_reimbursement = float(sum(match.seller_reimbursement for match in accepted))
@@ -289,6 +291,7 @@ class FutureV2VTimingEnv:
         seller_degradation_cost = sum(order.seller_degradation_cost for order in served)
         seller_service_premium = sum(order.seller_service_premium for order in served)
         platform_pickup_cost = sum(order.platform_pickup_cost for order in served)
+        total_pickup_distance = sum(order.pickup_distance_km_est for order in served)
         seller_time_cost = sum(order.seller_time_cost for order in served)
         donor_soc_after_values = [order.donor_soc_after_kwh for order in served if order.donor_soc_after_kwh > 0.0]
         floor_by_vehicle = {
@@ -340,6 +343,7 @@ class FutureV2VTimingEnv:
             profit_scale=profit_scale,
             env_config=self.env_config,
         )
+        distance_adjusted_score = score - self.env_config.pickup_distance_penalty_per_km * total_pickup_distance
         return EpisodeMetrics(
             policy_name=policy_name,
             seed=seed,
@@ -361,6 +365,10 @@ class FutureV2VTimingEnv:
             fleet_utilization=self._vehicle_utilization(fleet),
             private_utilization=self._vehicle_utilization(private),
             energy_utilization=used_energy / max(1.0, initial_available_energy),
+            total_pickup_distance_km=total_pickup_distance,
+            mean_pickup_distance_km=float(np.mean([order.pickup_distance_km_est for order in served])) if served else 0.0,
+            pickup_distance_per_served_order=total_pickup_distance / max(1, len(served)),
+            distance_adjusted_score=distance_adjusted_score,
             unmet_kwh=sum(order.demand_kwh for order in self.orders if order.status != ORDER_MATCHED),
             delivered_kwh=delivered_kwh,
             donor_output_kwh=donor_output_kwh,
@@ -813,6 +821,8 @@ class FutureV2VTimingEnv:
             "buyer_payment": result.buyer_payment,
             "seller_reimbursement": result.seller_reimbursement,
             "energy_loss_kwh": result.energy_loss_kwh,
+            "total_pickup_distance_km": result.total_pickup_distance_km,
+            "mean_pickup_distance_km": result.mean_pickup_distance_km,
             "mean_donor_soc_after_kwh": result.mean_donor_soc_after_kwh,
             "battery_health_rejection_count": result.battery_health_rejection_count,
         }
@@ -850,6 +860,8 @@ class FutureV2VTimingEnv:
                 "delivered_kwh": result.delivered_kwh,
                 "donor_output_kwh": result.donor_output_kwh,
                 "energy_loss_kwh": result.energy_loss_kwh,
+                "total_pickup_distance_km": result.total_pickup_distance_km,
+                "mean_pickup_distance_km": result.mean_pickup_distance_km,
                 "mean_donor_soc_after_kwh": result.mean_donor_soc_after_kwh,
                 "battery_health_rejection_count": result.battery_health_rejection_count,
                 "profit_per_dispatch": profit_per_dispatch,

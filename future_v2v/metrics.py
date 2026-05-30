@@ -31,6 +31,10 @@ class EpisodeMetrics:
     fleet_utilization: float
     private_utilization: float
     energy_utilization: float
+    total_pickup_distance_km: float = 0.0
+    mean_pickup_distance_km: float = 0.0
+    pickup_distance_per_served_order: float = 0.0
+    distance_adjusted_score: float = 0.0
     unmet_kwh: float = 0.0
     delivered_kwh: float = 0.0
     donor_output_kwh: float = 0.0
@@ -121,6 +125,10 @@ def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | s
         "mean_wait_before_match",
         "mean_batch_interval",
         "mean_pickup_time",
+        "total_pickup_distance_km",
+        "mean_pickup_distance_km",
+        "pickup_distance_per_served_order",
+        "distance_adjusted_score",
         "mean_commitment_ticks",
         "profit_per_served_order",
         "fleet_utilization",

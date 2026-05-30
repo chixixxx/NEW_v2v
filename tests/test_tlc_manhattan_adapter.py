@@ -5,9 +5,10 @@ from pathlib import Path
 import pandas as pd
 
 from future_v2v.algorithms.dqn import DQNTimingAgent
-from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig
+from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig, load_project_config
 from future_v2v.data.tlc_manhattan import load_tlc_manhattan_data, prepare_tlc_manhattan
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
+from future_v2v.simulation.network import TLCManhattanZoneNetwork, ZoneNetwork
 
 
 def make_tlc_files(tmp_path: Path) -> tuple[Path, Path]:
@@ -136,6 +137,34 @@ def test_tlc_environment_generates_reproducible_scenario(tmp_path: Path) -> None
     env_b.reset(seed=11)
     assert [order.arrival_tick for order in env_a.orders] == [order.arrival_tick for order in env_b.orders]
     assert env_a.network.zone_count == 2
+
+
+def test_pickup_distance_can_be_estimated_for_synthetic_and_tlc_networks(tmp_path: Path) -> None:
+    synthetic = ZoneNetwork(zone_count=4, minutes_per_tick=3)
+    assert synthetic.pickup_distance_km_est(0, 3, 0) > 0.0
+    trip_path, lookup_path = make_tlc_files(tmp_path)
+    env_config = make_env_config(tmp_path, trip_path, lookup_path)
+    prepare_tlc_manhattan(
+        trip_path=trip_path,
+        zone_lookup_path=lookup_path,
+        processed_dir=env_config.processed_dir,
+        month="2025-10",
+        tick_minutes=env_config.tick_minutes,
+        time_bucket_minutes=env_config.time_bucket_minutes,
+    )
+    data = load_tlc_manhattan_data(env_config)
+    network = TLCManhattanZoneNetwork(data, minutes_per_tick=3)
+    network.set_episode_context(start_tick_day=160)
+    assert network.pickup_distance_km_est(0, 1, 0) > 0.0
+
+
+def test_tick2_diagnostic_config_preserves_four_hour_main_window() -> None:
+    config = load_project_config("configs/tick2_diagnostic.json")
+    main = config.scale("main")
+    assert config.environment.tick_minutes == 2
+    assert main.horizon_ticks == 120
+    assert config.environment.service_kwh_per_tick == 1.8
+    assert main.horizon_ticks * config.environment.tick_minutes == 240
 
 
 def test_tlc_environment_keeps_configured_order_count_with_sparse_windows(tmp_path: Path) -> None:

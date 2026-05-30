@@ -37,6 +37,10 @@ class ZoneNetwork:
     def travel_minutes(self, origin_zone: int, destination_zone: int, tick: int) -> float:
         return self.travel_ticks(origin_zone, destination_zone, tick) * self.minutes_per_tick
 
+    def pickup_distance_km_est(self, origin_zone: int, destination_zone: int, tick: int) -> float:
+        _ = tick
+        return max(0.2, self.distance_units(origin_zone, destination_zone) * 0.85)
+
     def shortage_pressure_by_zone(
         self,
         active_order_zones: list[int],
@@ -74,6 +78,10 @@ class TLCManhattanZoneNetwork:
 
     def travel_minutes(self, origin_zone: int, destination_zone: int, tick: int) -> float:
         return self.travel_ticks(origin_zone, destination_zone, tick) * self.minutes_per_tick
+
+    def pickup_distance_km_est(self, origin_zone: int, destination_zone: int, tick: int) -> float:
+        minutes = self.travel_minutes(origin_zone, destination_zone, tick)
+        return max(0.2, minutes * 0.32)
 
     def shortage_pressure_by_zone(
         self,

@@ -55,6 +55,7 @@ class EnvironmentConfig:
     profit_scale_fallback: float
     enable_stochastic_acceptance: bool
     enable_stochastic_cancellation: bool
+    pickup_distance_penalty_per_km: float = 0.0
     service_risk_delta_weight: float = 0.12
     service_risk_delta_clip: float = 35.0
     wait_opportunity_weight: float = 0.02

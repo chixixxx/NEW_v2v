@@ -1,8 +1,8 @@
 {
   "experiment": {
-    "minutes_per_tick": 3,
+    "minutes_per_tick": 2,
     "output_root": "outputs",
-    "run_name_template": "{scale}_latest"
+    "run_name_template": "{scale}_tick2_latest"
   },
   "environment": {
     "zone_count": 16,
@@ -15,14 +15,14 @@
     "processed_dir": "data/processed",
     "manhattan_only": true,
     "travel_time_source": "empirical_median",
-    "tick_minutes": 3,
+    "tick_minutes": 2,
     "time_bucket_minutes": 60,
     "demand_sample_rate": 0.35,
     "supply_scale": 0.55,
     "max_candidate_vehicles_per_order": 20,
     "train_days": [],
     "eval_days": [],
-    "service_kwh_per_tick": 2.7,
+    "service_kwh_per_tick": 1.8,
     "pickup_cap_minutes": 18.0,
     "platform_pickup_cost_per_min": 0.06,
     "dispatch_friction": {
@@ -31,14 +31,14 @@
       "pair_coordination_cost": 0.75,
       "full_mode_extra_pair_cost": 0.20,
       "refresh_cost": 16.0,
-      "refresh_decay_ticks": 1.5
+      "refresh_decay_ticks": 2.25
     },
     "dispatch_capacity_ratio": 0.55,
     "dispatch_capacity_min": 8,
     "dispatch_capacity_max": 80,
     "queue_threshold_ratio": 0.55,
     "queue_threshold_min": 24,
-    "wait_penalty_per_order_tick": 0.008,
+    "wait_penalty_per_order_tick": 0.006,
     "expired_penalty": 10.0,
     "cancelled_penalty": 8.0,
     "service_rate_target": 0.62,
@@ -46,7 +46,7 @@
     "expired_rate_cap": 0.16,
     "cancelled_rate_cap": 0.10,
     "mean_pickup_soft_cap_min": 10.0,
-    "mean_commitment_soft_cap_ticks": 7.0,
+    "mean_commitment_soft_cap_ticks": 10.5,
     "profit_scale_fallback": 5.0,
     "pickup_distance_penalty_per_km": 0.0,
     "enable_stochastic_acceptance": true,
@@ -64,8 +64,8 @@
   },
   "scales": {
     "smoke": {
-      "horizon_ticks": 60,
-      "terminal_buffer_ticks": 8,
+      "horizon_ticks": 90,
+      "terminal_buffer_ticks": 12,
       "total_orders": 80,
       "candidate_vehicles": 120,
       "vehicle_join_probability": 0.55,
@@ -74,8 +74,8 @@
       "eval_episodes": 8
     },
     "main": {
-      "horizon_ticks": 80,
-      "terminal_buffer_ticks": 14,
+      "horizon_ticks": 120,
+      "terminal_buffer_ticks": 21,
       "total_orders": 1600,
       "candidate_vehicles": 1900,
       "vehicle_join_probability": 0.36,

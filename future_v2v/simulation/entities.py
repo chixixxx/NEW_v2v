@@ -35,6 +35,7 @@ class Order:
     seller_degradation_cost: float = 0.0
     seller_service_premium: float = 0.0
     platform_pickup_cost: float = 0.0
+    pickup_distance_km_est: float = 0.0
     seller_time_cost: float = 0.0
     delivered_kwh: float = 0.0
     donor_output_kwh: float = 0.0
@@ -116,6 +117,7 @@ class CandidateEdge:
     vehicle_id: int
     pickup_ticks: float
     pickup_minutes: float
+    pickup_distance_km_est: float
     service_ticks: float
     total_commitment_ticks: float
     delivered_kwh: float
@@ -155,6 +157,7 @@ class Match:
     expected_profit: float
     realized_profit: float
     pickup_minutes: float
+    pickup_distance_km_est: float
     total_commitment_ticks: float
     accepted: bool
     delivered_kwh: float = 0.0
@@ -191,6 +194,8 @@ class StepResult:
     friction_share_of_gross_profit: float = 0.0
     candidate_edge_count: int = 0
     mean_pickup_minutes: float = 0.0
+    total_pickup_distance_km: float = 0.0
+    mean_pickup_distance_km: float = 0.0
     mean_commitment_ticks: float = 0.0
     buyer_payment: float = 0.0
     seller_reimbursement: float = 0.0

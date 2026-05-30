@@ -27,6 +27,7 @@ class Transition:
     next_obs: np.ndarray
     done: bool
     priority: float = 1.0
+    duration: int = 1
 
 
 class ReplayBuffer:
@@ -52,14 +53,14 @@ class ReplayBuffer:
 
 
 class QNetwork(nn.Module):
-    def __init__(self, obs_dim: int, hidden_dim: int) -> None:
+    def __init__(self, obs_dim: int, hidden_dim: int, action_count: int = ACTION_COUNT) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, ACTION_COUNT),
+            nn.Linear(hidden_dim, action_count),
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
@@ -67,7 +68,7 @@ class QNetwork(nn.Module):
 
 
 class DQNTimingAgent:
-    name = "dqn_adaptive_timing"
+    name = "dqn_adaptive_timing_legacy"
 
     def __init__(
         self,
@@ -452,7 +453,8 @@ class DQNTimingAgent:
                 next_q = self.target(next_obs).gather(1, next_actions).squeeze(1)
             else:
                 next_q = torch.max(self.target(next_obs), dim=1).values
-            target = rewards + self.config.gamma * (1.0 - done) * next_q
+            durations = torch.as_tensor([max(1, item.duration) for item in batch], dtype=torch.float32, device=self.device)
+            target = rewards + torch.pow(torch.as_tensor(self.config.gamma, dtype=torch.float32, device=self.device), durations) * (1.0 - done) * next_q
         loss = nn.functional.smooth_l1_loss(q_values, target)
         self.optimizer.zero_grad()
         loss.backward()
