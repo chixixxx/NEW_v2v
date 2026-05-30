@@ -1,19 +1,16 @@
 # Future V2V Adaptive Timing
 
-独立研究工程：强化学习决定 V2V 平台何时触发批量匹配，约束优化器决定订单与车辆如何匹配。
-
-默认主环境使用 NYC TLC 黄出租数据改造出的 Manhattan taxi-zone 级 Future V2V 场景。黄出租数据只提供真实时空需求、OD 热点、行程时间和价格强度；V2V 的电量、等待窗口、报价、保留电量、SOC、电池健康和车辆供给仍由业务模型生成。
+本项目研究双边 V2V 平台中的自适应批量匹配时机：强化学习选择匹配间隔，约束优化器统一决定具体 CV-DV 匹配边。默认主环境使用 NYC TLC 黄出租数据改造出的 Manhattan taxi-zone 级 Future V2V 场景；出租车数据只提供时空需求、OD 热点、行程时间和价格强度，V2V 的电量、等待窗口、报价、保留电量、SOC、电池健康和车辆供给仍由业务模型生成。
 
 当前主线：
 
 - 1 tick = 3 分钟。
-- 主算法动作空间：立即匹配、延迟 1 步后匹配、延迟 2 步后匹配、延迟 3 步后匹配。
-- 旧三动作 `WAIT / MATCH_TOP_BATCH / MATCH_FULL` 仅保留为诊断基线。
-- `main`：约 4 小时决策窗口 + 42 分钟 terminal buffer。
-- `smoke`：约 3 小时决策窗口 + 24 分钟 terminal buffer。
-- DQN 训练支持并行 rollout workers。
-- 默认训练使用 PBRS 奖励塑造和 `compact_v2v` 紧凑观测；最终评估指标不因奖励塑造改变。
-- 电池健康与双边价格机制默认开启：传输效率、最低 SOC、安全可供电量、退化成本、卖方补偿和平台边际收益都会进入匹配约束与评估指标。
+- 主算法动作：立即匹配、延迟 1 步后匹配、延迟 2 步后匹配、延迟 3 步后匹配。
+- 底层环境动作只保留 `WAIT` 和 `MATCH_FULL`；旧三动作 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`、top-batch、queue、pressure、short-lookahead 和旧三动作 DQN 已下线。
+- 主评估表只保留固定 1/2/3/4 步完整匹配、手写强规则和 `adaptive_interval_dqn`。
+- `main` 约 4 小时决策窗口 + 42 分钟 terminal buffer；`smoke` 约 3 小时决策窗口 + 24 分钟 terminal buffer。
+- 默认训练使用 PBRS 奖励塑造和 `compact_v2v` 紧凑观测，最终评估指标不因奖励塑造改变。
+- 电池健康与双边价格机制默认开启，传输效率、最低 SOC、安全可供电量、退化成本、卖方补偿和平台边际收益都会进入匹配约束与评估指标。
 
 准备 TLC Manhattan 缓存：
 
@@ -58,8 +55,8 @@ python -m ruff check future_v2v scripts tests
 - `docs/environment_design_zh.md`
 - `docs/runbook_zh.md`
 
-## Episode demand scale
+## Episode Demand Scale
 
-`scales.<scale>.total_orders` is a fixed episode order count, not an upper bound. TLC rows calibrate temporal-spatial demand, OD structure, travel time, and price strength. Sparse sampled windows are resampled with zone-pressure weights so evaluation does not mix different order scales.
+`scales.<scale>.total_orders` 是固定的单轮订单数，不是上界。TLC 行程用于校准时空需求、OD 结构、旅行时间和价格强度；稀疏采样窗口会按区域压力重采样，因此评估不会混入不同订单规模。
 
-`outputs/<run_name>/env_health/eval_scenario_manifest.csv` stores fixed evaluation windows. When present, `eval` reuses those scenarios so repeated evaluations compare policies on the same Manhattan demand windows.
+`outputs/<run_name>/env_health/eval_scenario_manifest.csv` 保存固定评估窗口。存在该文件时，`eval` 会复用同一批场景，保证策略比较使用相同 Manhattan 需求窗口。

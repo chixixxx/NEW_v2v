@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from future_v2v.algorithms.dqn import DQNTimingAgent
+from future_v2v.algorithms.interval_dqn import AdaptiveIntervalDQNAgent
 from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig, load_project_config
 from future_v2v.data.tlc_manhattan import load_tlc_manhattan_data, prepare_tlc_manhattan
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
@@ -56,15 +56,9 @@ def make_tlc_files(tmp_path: Path) -> tuple[Path, Path]:
 def make_env_config(tmp_path: Path, trip_path: Path, lookup_path: Path) -> EnvironmentConfig:
     return EnvironmentConfig(
         zone_count=16,
-        action_space="wait_topbatch_full",
         service_kwh_per_tick=2.7,
         pickup_cap_minutes=18.0,
         platform_pickup_cost_per_min=0.06,
-        dispatch_capacity_ratio=0.55,
-        dispatch_capacity_min=8,
-        dispatch_capacity_max=80,
-        queue_threshold_ratio=0.55,
-        queue_threshold_min=24,
         wait_penalty_per_order_tick=0.008,
         expired_penalty=10.0,
         cancelled_penalty=8.0,
@@ -281,7 +275,7 @@ def test_dqn_validation_manifest_uses_time_bucket_rows(tmp_path: Path) -> None:
         validation_off_peak_score_floor=0.0,
     )
     _ = env_config, scale
-    agent = DQNTimingAgent(obs_dim=1, training_config=training)
+    agent = AdaptiveIntervalDQNAgent(obs_dim=1, training_config=training)
     rows = agent._validation_manifest(env_config, scale, seed_start=123)
     assert len(rows) == training.validation_episodes
     assert {str(row["time_of_day_bucket"]) for row in rows}
@@ -323,7 +317,7 @@ def test_dqn_checkpoint_selection_score_balances_mean_worst_and_off_peak_floor(t
         validation_off_peak_score_floor=0.0,
     )
     _ = env_config, scale
-    agent = DQNTimingAgent(obs_dim=1, training_config=training)
+    agent = AdaptiveIntervalDQNAgent(obs_dim=1, training_config=training)
     score, penalty = agent._checkpoint_selection_score(
         mean_score=100.0,
         worst_bucket_score=20.0,

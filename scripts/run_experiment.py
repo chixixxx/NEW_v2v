@@ -13,7 +13,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from future_v2v.algorithms.baselines import TimingPolicy, default_baselines, policy_from_name, run_policy_episode
-from future_v2v.algorithms.dqn import DQNTimingAgent
 from future_v2v.algorithms.interval_dqn import AdaptiveIntervalDQNAgent
 from future_v2v.config import DispatchFrictionConfig, ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
@@ -109,12 +108,7 @@ def run_train(
     obs, _ = env.reset(seed=seed)
     train_episodes = episodes or config.scale(scale_name).train_episodes
     worker_count = max(1, int(rollout_workers or config.training.rollout_workers))
-    use_interval = config.environment.action_space == "adaptive_interval"
-    agent = (
-        AdaptiveIntervalDQNAgent(obs_dim=len(obs), training_config=config.training)
-        if use_interval
-        else DQNTimingAgent(obs_dim=len(obs), training_config=config.training)
-    )
+    agent = AdaptiveIntervalDQNAgent(obs_dim=len(obs), training_config=config.training)
     history = agent.train(
         env_factory,
         episodes=train_episodes,
@@ -128,12 +122,8 @@ def run_train(
     write_csv(run_dir / "train" / "training_curve_comparison.csv", _training_curve_comparison_rows(history))
     write_csv(run_dir / "train" / "pbrs_ablation_summary.csv", _pbrs_ablation_summary_rows(history, config.training.reward_shaping_mode))
     write_csv(run_dir / "train" / "validation_history.csv", agent.validation_history)
-    if use_interval:
-        write_csv(run_dir / "train" / "interval_action_distribution.csv", _interval_action_distribution_rows(history))
-        agent.save(run_dir / "train" / "adaptive_interval_dqn_agent.pt")
-    else:
-        write_csv(run_dir / "train" / "action_distribution.csv", _action_distribution_rows(history))
-        agent.save(run_dir / "train" / "dqn_timing_agent.pt")
+    write_csv(run_dir / "train" / "interval_action_distribution.csv", _interval_action_distribution_rows(history))
+    agent.save(run_dir / "train" / "adaptive_interval_dqn_agent.pt")
     write_markdown_report(
         run_dir / "train" / "train_report.md",
         title=f"DQN Timing Training ({scale_name})",
@@ -160,12 +150,8 @@ def run_eval(
     manifest_rows = _load_or_build_eval_manifest(config, scale_name, run_dir, seed=seed, count=count)
     policy_specs: list[tuple[str, str]] = [("baseline", policy.name) for policy in default_baselines()]
     interval_checkpoint = run_dir / "train" / "adaptive_interval_dqn_agent.pt"
-    legacy_checkpoint = run_dir / "train" / "dqn_timing_agent.pt"
-    if config.environment.action_space == "adaptive_interval":
-        if interval_checkpoint.exists():
-            policy_specs.append(("interval_dqn", str(interval_checkpoint)))
-    elif legacy_checkpoint.exists():
-        policy_specs.append(("dqn", str(legacy_checkpoint)))
+    if interval_checkpoint.exists():
+        policy_specs.append(("interval_dqn", str(interval_checkpoint)))
     results = _evaluate_policy_specs(
         config,
         scale_name,
@@ -294,10 +280,6 @@ def _run_eval_task(
     kind, value = policy_spec
     if kind == "baseline":
         policy = policy_from_name(value)
-    elif kind == "dqn":
-        obs, _ = _reset_eval_env(env, scenario)
-        policy = DQNTimingAgent.load(Path(value), config.training)
-        _ = obs
     elif kind == "interval_dqn":
         obs, _ = _reset_eval_env(env, scenario)
         policy = AdaptiveIntervalDQNAgent.load(Path(value), config.training)
@@ -397,18 +379,6 @@ def _tag_trace_rows(
         materialized.update(row)
         tagged.append(materialized)
     return tagged
-
-
-def _action_distribution_rows(history: list[dict[str, float | int]]) -> list[dict[str, object]]:
-    return [
-        {
-            "episode": row["episode"],
-            "wait_count": row.get("wait_count", 0),
-            "top_batch_count": row.get("top_batch_count", 0),
-            "full_match_count": row.get("full_match_count", 0),
-        }
-        for row in history
-    ]
 
 
 def _interval_action_distribution_rows(history: list[dict[str, float | int]]) -> list[dict[str, object]]:
@@ -750,20 +720,11 @@ def _friction_sensitivity_row(
     summary_by_policy = {str(row["policy_name"]): row for row in summary_rows}
     fixed_1 = summary_by_policy.get("fixed_1_tick_full_match", {})
     fixed_2 = summary_by_policy.get("fixed_2_tick_full_match", {})
-    fixed_1_top = summary_by_policy.get("fixed_1_tick_top_batch", {})
     best = max(summary_rows, key=lambda row: float(row["future_v2v_score_mean"]), default={})
     fixed_1_score = float(fixed_1.get("future_v2v_score_mean", 0.0))
     fixed_1_service = float(fixed_1.get("service_rate_mean", 0.0))
     fixed_2_service = float(fixed_2.get("service_rate_mean", 0.0))
-    fixed_1_top_score = float(fixed_1_top.get("future_v2v_score_mean", fixed_1_score))
-    top_batch_gap_ratio = abs(fixed_1_top_score - fixed_1_score) / max(
-        1.0,
-        abs(fixed_1_top_score),
-        abs(fixed_1_score),
-    )
-    dispatch_by_policy: dict[str, list[dict[str, object]]] = {}
-    for row in dispatch_rows:
-        dispatch_by_policy.setdefault(str(row["policy_name"]), []).append(row)
+    _ = dispatch_rows
     paired_best = paired_rows[0] if paired_rows else {}
     return {
         "variant": variant_name,
@@ -774,12 +735,6 @@ def _friction_sensitivity_row(
         "paired_best_score_win_rate": paired_best.get("score_win_rate", 0.0),
         "best_mean_batch_interval": best.get("mean_batch_interval_mean", 0.0),
         "fixed2_service_drop_vs_fixed1": fixed_1_service - fixed_2_service,
-        "fixed1_top_batch_score_gap_ratio": top_batch_gap_ratio,
-        "fixed1_top_batch_capacity_bind_rate": _capacity_bind_rate(
-            dispatch_by_policy.get("fixed_1_tick_top_batch", [])
-        )
-        if fixed_1_top
-        else 0.0,
         "mean_friction_share_of_gross_profit": best.get("friction_share_of_gross_profit_mean", 0.0),
         "dispatch_friction_cost_mean": best.get("dispatch_friction_cost_mean", 0.0),
     }
@@ -869,38 +824,23 @@ def _timing_policy_comparison(
     summary_by_policy = {str(row["policy_name"]): row for row in summary_rows}
     fixed_1 = summary_by_policy.get("fixed_1_tick_full_match")
     fixed_2 = summary_by_policy.get("fixed_2_tick_full_match")
-    fixed_1_top = summary_by_policy.get("fixed_1_tick_top_batch")
     best_score = max((float(row["future_v2v_score_mean"]) for row in summary_rows), default=0.0)
     intervals = [float(row["mean_batch_interval_mean"]) for row in summary_rows]
     fixed_1_score = float(fixed_1["future_v2v_score_mean"]) if fixed_1 else 0.0
     fixed_1_profit = float(fixed_1["platform_profit_mean"]) if fixed_1 else 0.0
     fixed_1_service = float(fixed_1["service_rate_mean"]) if fixed_1 else 0.0
     fixed_2_service = float(fixed_2["service_rate_mean"]) if fixed_2 else 0.0
-    fixed_1_top_score = float(fixed_1_top["future_v2v_score_mean"]) if fixed_1_top else fixed_1_score
     energy_loss_rate = float(fixed_1["energy_loss_rate"]) if fixed_1 else 0.0
     seller_compensation_share = float(fixed_1["seller_compensation_share"]) if fixed_1 else 0.0
     policy_spread_score = best_score - fixed_1_score
     batch_interval_spread = max(intervals, default=0.0) - min(intervals, default=0.0)
-    top_batch_viability = 1.0 - abs(fixed_1_top_score - fixed_1_score) / max(
-        1.0,
-        abs(fixed_1_score),
-        abs(fixed_1_top_score),
-    )
-    top_batch_score_gap_ratio = abs(fixed_1_top_score - fixed_1_score) / max(
-        1.0,
-        abs(fixed_1_score),
-        abs(fixed_1_top_score),
-    )
     service_drop_fixed2_vs_fixed1 = fixed_1_service - fixed_2_service
-    fixed_1_top_dispatches = dispatch_by_policy.get("fixed_1_tick_top_batch", [])
-    fixed_1_top_bind_rate = _capacity_bind_rate(fixed_1_top_dispatches) if fixed_1_top else 0.0
     comparison = []
     for row in summary_rows:
         policy_name = str(row["policy_name"])
         dispatches = dispatch_by_policy.get(policy_name, [])
         profit_values = [float(item["platform_profit"]) for item in dispatches]
         accepted_values = [float(item["accepted_count"]) for item in dispatches]
-        capacity_bind_rate = _capacity_bind_rate(dispatches)
         comparison.append(
             {
                 "policy_name": policy_name,
@@ -916,10 +856,6 @@ def _timing_policy_comparison(
                 "timing_degeneracy": bool(float(row["mean_batch_interval_mean"]) <= 1.15),
                 "policy_spread_score": policy_spread_score,
                 "batch_interval_spread": batch_interval_spread,
-                "top_batch_viability": top_batch_viability,
-                "top_batch_score_gap_ratio": top_batch_score_gap_ratio,
-                "capacity_bind_rate": capacity_bind_rate,
-                "fixed_1_top_batch_capacity_bind_rate": fixed_1_top_bind_rate,
                 "service_drop_fixed2_vs_fixed1": service_drop_fixed2_vs_fixed1,
                 "full_match_cost_gap": float(row["platform_profit_mean"]) - fixed_1_profit,
                 "energy_loss_rate": row.get("energy_loss_rate", energy_loss_rate),
@@ -931,7 +867,6 @@ def _timing_policy_comparison(
                     policy_spread_score > 300.0
                     and batch_interval_spread >= 0.8
                     and 0.04 <= service_drop_fixed2_vs_fixed1 <= 0.10
-                    and (not fixed_1_top or 0.25 <= fixed_1_top_bind_rate <= 0.60)
                 ),
             }
         )
@@ -949,28 +884,14 @@ def _environment_acceptance_summary(
     summary_by_policy = {str(row["policy_name"]): row for row in summary_rows}
     fixed_1 = summary_by_policy.get("fixed_1_tick_full_match", {})
     fixed_2 = summary_by_policy.get("fixed_2_tick_full_match", {})
-    fixed_1_top = summary_by_policy.get("fixed_1_tick_top_batch", {})
     best = max(summary_rows, key=lambda row: float(row["future_v2v_score_mean"]), default={})
-    dispatch_by_policy: dict[str, list[dict[str, object]]] = {}
-    for row in dispatch_rows:
-        dispatch_by_policy.setdefault(str(row["policy_name"]), []).append(row)
-    action_counts: dict[str, dict[str, int]] = {}
-    for row in action_rows:
-        policy = str(row["policy_name"])
-        action = str(row["action_name"])
-        action_counts.setdefault(policy, {})[action] = action_counts.setdefault(policy, {}).get(action, 0) + 1
+    _ = dispatch_rows
+    _ = action_rows
     fixed_1_score = float(fixed_1.get("future_v2v_score_mean", 0.0))
-    fixed_1_top_score = float(fixed_1_top.get("future_v2v_score_mean", fixed_1_score))
-    top_batch_gap_ratio = abs(fixed_1_top_score - fixed_1_score) / max(
-        1.0,
-        abs(fixed_1_top_score),
-        abs(fixed_1_score),
-    )
     fixed_1_service = float(fixed_1.get("service_rate_mean", 0.0))
     fixed_2_service = float(fixed_2.get("service_rate_mean", 0.0))
     fixed_1_expired = float(fixed_1.get("expired_rate_mean", 0.0))
     best_score_delta = float(best.get("future_v2v_score_mean", 0.0)) - fixed_1_score
-    fixed_1_top_bind_rate = _capacity_bind_rate(dispatch_by_policy.get("fixed_1_tick_top_batch", [])) if fixed_1_top else 0.0
     interval_actions: dict[str, int] = {}
     for row in interval_rows:
         if str(row.get("policy_name", "")) != "adaptive_interval_dqn":
@@ -989,9 +910,6 @@ def _environment_acceptance_summary(
     interval_delayed_action_rate = (
         interval_total - interval_actions.get("dispatch_now", 0)
     ) / max(1, interval_total) if interval_total else 0.0
-    legacy_actions = action_counts.get("dqn_adaptive_timing_legacy", {})
-    legacy_total = sum(legacy_actions.values())
-    legacy_top_batch_rate = legacy_actions.get("match_top_batch", 0) / max(1, legacy_total) if legacy_total else 0.0
     best_interval = float(best.get("mean_batch_interval_mean", 0.0))
     paired_best = paired_rows[0] if paired_rows else {}
     paired_best_delta = float(paired_best.get("score_delta_mean", 0.0))
@@ -999,7 +917,6 @@ def _environment_acceptance_summary(
     no_refresh_delta = _variant_delta(sensitivity_rows, "no_refresh_friction") if friction_sensitivity_run else 0.0
     baseline_ready = bool(
         paired_best_delta > 250.0
-        and (not fixed_1_top or 0.25 <= fixed_1_top_bind_rate <= 0.60)
         and 0.04 <= fixed_1_service - fixed_2_service <= 0.10
         and 0.15 <= fixed_1_expired <= 0.26
         and 1.00 <= best_interval <= 2.50
@@ -1010,9 +927,8 @@ def _environment_acceptance_summary(
         and interval_max_action_share <= 0.75
         and 1.20 <= interval_mean_action_interval <= 2.20
     )
-    legacy_action_ready = bool(legacy_total and legacy_top_batch_rate >= 0.20)
-    learned_policy_total = interval_total + legacy_total
-    dqn_ready = bool(interval_action_ready or legacy_action_ready)
+    learned_policy_total = interval_total
+    dqn_ready = bool(interval_action_ready)
     return [
         {
             "best_policy": best.get("policy_name", ""),
@@ -1020,13 +936,10 @@ def _environment_acceptance_summary(
             "best_mean_batch_interval": best_interval,
             "fixed1_expired_rate": fixed_1_expired,
             "fixed2_service_drop_vs_fixed1": fixed_1_service - fixed_2_service,
-            "fixed1_top_batch_score_gap_ratio": top_batch_gap_ratio,
-            "fixed1_top_batch_capacity_bind_rate": fixed_1_top_bind_rate,
             "adaptive_interval_action_count": interval_total,
             "adaptive_interval_mean_action_interval": interval_mean_action_interval,
             "adaptive_interval_delayed_action_rate": interval_delayed_action_rate,
             "adaptive_interval_max_action_share": interval_max_action_share,
-            "legacy_dqn_top_batch_action_rate": legacy_top_batch_rate,
             "paired_best_policy": paired_best.get("policy_name", ""),
             "paired_best_score_delta_mean": paired_best_delta,
             "paired_best_score_win_rate": paired_best.get("score_win_rate", 0.0),
@@ -1037,20 +950,9 @@ def _environment_acceptance_summary(
             "friction_sensitive_risk": bool(friction_sensitivity_run and no_refresh_delta < 200.0),
             "dqn_action_ready": dqn_ready,
             "adaptive_interval_action_ready": interval_action_ready,
-            "legacy_dqn_action_ready": legacy_action_ready,
             "dynamic_timing_ready": bool(friction_robust_ready and (dqn_ready or not learned_policy_total)),
         }
     ]
-
-
-def _capacity_bind_rate(dispatches: list[dict[str, object]]) -> float:
-    top_batch = [row for row in dispatches if str(row.get("dispatch_mode", "")) == "match_top_batch"]
-    if not top_batch:
-        return 0.0
-    return float(
-        sum(float(row.get("matched_count", 0)) >= float(row.get("dispatch_capacity", 0)) for row in top_batch)
-        / len(top_batch)
-    )
 
 
 def main() -> None:

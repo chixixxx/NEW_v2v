@@ -78,7 +78,7 @@ handcrafted_deadline_rule
 adaptive_interval_dqn
 ```
 
-`fixed_1_tick_top_batch`、queue、pressure、short-lookahead 等旧策略仍保留在代码中，用于诊断和教师样本，但不再默认进入主评估表。
+旧的 top-batch、queue、pressure、short-lookahead 策略和旧三动作 DQN 已下线；主表只保留固定 1/2/3/4 步完整匹配、手写强规则和匹配间隔 DQN。
 
 摩擦灵敏度不再随主实验默认运行，需要单独调用：
 

@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from future_v2v.algorithms.baselines import QueueThresholdPolicy, default_baselines, policy_from_name, teacher_policies
+from future_v2v.algorithms.baselines import default_baselines, policy_from_name
 from future_v2v.algorithms.interval_dqn import interval_teacher_action
-from future_v2v.envs.timing_env import ACTION_COUNT, COMPACT_OBSERVATION_NAMES, MATCH_FULL, MATCH_TOP_BATCH, WAIT
+from future_v2v.envs.timing_env import ACTION_COUNT, COMPACT_OBSERVATION_NAMES, MATCH_FULL, WAIT
 from tests.test_env_semantics import install_single_order_vehicle, make_env
 
 
-def test_teacher_and_baselines_use_three_action_timing_interface() -> None:
+def test_baselines_use_wait_full_timing_interface() -> None:
     env = make_env()
     install_single_order_vehicle(env)
     obs = env._observation()
-    for policy in [*teacher_policies(), *default_baselines()]:
+    for policy in default_baselines():
         action = policy.act(env, obs)
-        assert action in (WAIT, MATCH_TOP_BATCH, MATCH_FULL)
+        assert action in (WAIT, MATCH_FULL)
 
 
 def test_observation_is_fixed_low_dimensional_vector() -> None:
@@ -29,15 +30,8 @@ def test_observation_is_fixed_low_dimensional_vector() -> None:
     assert "mean_pickup_distance_est" in env.observation_names
 
 
-def test_dqn_action_count_is_three() -> None:
-    assert ACTION_COUNT == 3
-
-
-def test_queue_threshold_uses_scale_aware_ratio() -> None:
-    env = make_env()
-    install_single_order_vehicle(env)
-    policy = QueueThresholdPolicy(threshold_ratio=1.0, threshold_min=4)
-    assert policy.act(env, env._observation()) == WAIT
+def test_environment_action_count_is_wait_and_full_match() -> None:
+    assert ACTION_COUNT == 2
 
 
 def test_default_eval_baselines_are_concise_main_table() -> None:
@@ -49,7 +43,9 @@ def test_default_eval_baselines_are_concise_main_table() -> None:
         "fixed_4_tick_full_match",
         "handcrafted_deadline_rule",
     ]
-    assert policy_from_name("fixed_1_tick_top_batch").name == "fixed_1_tick_top_batch"
+    assert policy_from_name("fixed_1_tick_full_match").name == "fixed_1_tick_full_match"
+    with pytest.raises(KeyError):
+        policy_from_name("fixed_1_tick_top_batch")
 
 
 def test_interval_teacher_uses_immediate_match_for_deadline_rescue() -> None:

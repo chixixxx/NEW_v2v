@@ -41,7 +41,7 @@ def test_solver_respects_one_vehicle_one_order() -> None:
     assert len(plan.matches) == 1
 
 
-def test_top_batch_respects_capacity() -> None:
+def test_full_match_keeps_all_profitable_assignment_matches() -> None:
     env = make_env()
     install_single_order_vehicle(env)
     for idx in range(3):
@@ -72,19 +72,16 @@ def test_top_batch_respects_capacity() -> None:
         )
         env.orders.append(order)
         env.vehicles.append(vehicle)
-    plan = env.matcher.solve(env.orders, env.vehicles, tick=0, dispatch_mode="top_batch", capacity=2)
-    assert len(plan.matches) == 2
+    plan = env.matcher.solve(env.orders, env.vehicles, tick=0)
+    assert len(plan.matches) == 4
     assert all(edge.expected_profit > 0.0 for edge in plan.matches)
 
 
-def test_full_match_keeps_all_profitable_assignment_matches() -> None:
+def test_solver_signature_is_full_match_only() -> None:
     env = make_env()
     install_single_order_vehicle(env)
-    full = env.matcher.solve(env.orders, env.vehicles, tick=0, dispatch_mode="full", capacity=1)
-    legacy = env.matcher.solve(env.orders, env.vehicles, tick=0)
-    assert [(edge.order_id, edge.vehicle_id) for edge in full.matches] == [
-        (edge.order_id, edge.vehicle_id) for edge in legacy.matches
-    ]
+    plan = env.matcher.solve(env.orders, env.vehicles, tick=0)
+    assert [(edge.order_id, edge.vehicle_id) for edge in plan.matches] == [(1, 2)]
 
 
 def test_matcher_uses_transfer_efficiency_and_price_components() -> None:

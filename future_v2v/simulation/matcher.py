@@ -107,14 +107,7 @@ class ConstrainedMatcher:
             reason=reason,
         )
 
-    def solve(
-        self,
-        orders: list[Order],
-        vehicles: list[Vehicle],
-        tick: int,
-        dispatch_mode: str = "full",
-        capacity: int | None = None,
-    ) -> MatchPlan:
+    def solve(self, orders: list[Order], vehicles: list[Vehicle], tick: int) -> MatchPlan:
         all_edges = self.build_edges(orders, vehicles, tick, include_infeasible=True)
         rejected_reason_counts: dict[str, int] = {}
         for edge in all_edges:
@@ -123,7 +116,6 @@ class ConstrainedMatcher:
         edges = [edge for edge in all_edges if edge.feasible]
         if not edges:
             return MatchPlan(edges=[], matches=[], rejected_reason_counts=rejected_reason_counts)
-        orders_by_id = {order.order_id: order for order in orders}
         active_order_ids = sorted({edge.order_id for edge in edges})
         active_vehicle_ids = sorted({edge.vehicle_id for edge in edges})
         order_index = {order_id: idx for idx, order_id in enumerate(active_order_ids)}
@@ -144,28 +136,7 @@ class ConstrainedMatcher:
             order_id = active_order_ids[row]
             vehicle_id = active_vehicle_ids[col]
             matches.append(edge_by_pair[(order_id, vehicle_id)])
-        if dispatch_mode == "top_batch":
-            limit = max(0, int(capacity or 0))
-            if limit <= 0:
-                matches = []
-            elif len(matches) > limit:
-                matches = sorted(
-                    matches,
-                    key=lambda edge: self._adjusted_edge_value(edge, orders_by_id[edge.order_id], tick),
-                    reverse=True,
-                )[:limit]
-        elif dispatch_mode != "full":
-            raise ValueError(f"unknown dispatch_mode={dispatch_mode!r}; expected 'full' or 'top_batch'")
         return MatchPlan(edges=edges, matches=matches, rejected_reason_counts=rejected_reason_counts)
-
-    def _adjusted_edge_value(self, edge: CandidateEdge, order: Order, tick: int) -> float:
-        wait_ratio = order.waiting_ratio(tick)
-        pickup_penalty = 0.06 * edge.pickup_minutes
-        wait_risk_penalty = 1.4 * max(0.0, wait_ratio - 0.70)
-        urgency_bonus = 2.0 if order.is_urgent() else 0.0
-        deadline_bonus = 3.5 * max(0.0, wait_ratio - 0.68)
-        profit_bonus = 0.10 * max(0.0, edge.expected_profit - 10.0)
-        return edge.expected_profit + profit_bonus - pickup_penalty - wait_risk_penalty + urgency_bonus + deadline_bonus
 
     def realize_matches(
         self,

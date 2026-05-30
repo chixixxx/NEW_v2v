@@ -178,15 +178,9 @@ def prepare_tlc_manhattan(
         raise FileNotFoundError(f"TLC taxi zone lookup not found: {zone_lookup_path}")
     env_stub = EnvironmentConfig(
         zone_count=16,
-        action_space="wait_topbatch_full",
         service_kwh_per_tick=2.7,
         pickup_cap_minutes=18.0,
         platform_pickup_cost_per_min=0.06,
-        dispatch_capacity_ratio=0.55,
-        dispatch_capacity_min=8,
-        dispatch_capacity_max=80,
-        queue_threshold_ratio=0.55,
-        queue_threshold_min=24,
         wait_penalty_per_order_tick=0.008,
         expired_penalty=10.0,
         cancelled_penalty=8.0,

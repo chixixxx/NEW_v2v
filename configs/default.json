@@ -6,7 +6,6 @@
   },
   "environment": {
     "zone_count": 16,
-    "action_space": "adaptive_interval",
     "scenario_source": "tlc_manhattan",
     "allow_synthetic_smoke_fallback": true,
     "tlc_trip_path": "yellow_tripdata_2025-10.parquet",
@@ -33,11 +32,6 @@
       "refresh_cost": 16.0,
       "refresh_decay_ticks": 1.5
     },
-    "dispatch_capacity_ratio": 0.55,
-    "dispatch_capacity_min": 8,
-    "dispatch_capacity_max": 80,
-    "queue_threshold_ratio": 0.55,
-    "queue_threshold_min": 24,
     "wait_penalty_per_order_tick": 0.008,
     "expired_penalty": 10.0,
     "cancelled_penalty": 8.0,

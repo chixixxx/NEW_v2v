@@ -1,24 +1,17 @@
 from __future__ import annotations
 
 from future_v2v.config import DispatchFrictionConfig, EnvironmentConfig, ScaleConfig
-from future_v2v.algorithms.baselines import WaitOpportunityTeacherPolicy, teacher_policies
 from future_v2v.algorithms.interval_dqn import execute_interval_action
-from future_v2v.envs.timing_env import LEGACY_OBSERVATION_NAMES, MATCH_FULL, MATCH_TOP_BATCH, WAIT, FutureV2VTimingEnv
+from future_v2v.envs.timing_env import LEGACY_OBSERVATION_NAMES, MATCH_FULL, WAIT, FutureV2VTimingEnv
 from future_v2v.simulation.entities import ORDER_EXPIRED, ORDER_MATCHED, Order, Vehicle
 
 
 def make_env() -> FutureV2VTimingEnv:
     env_config = EnvironmentConfig(
         zone_count=4,
-        action_space="wait_topbatch_full",
         service_kwh_per_tick=5.0,
         pickup_cap_minutes=30.0,
         platform_pickup_cost_per_min=0.0,
-        dispatch_capacity_ratio=0.55,
-        dispatch_capacity_min=1,
-        dispatch_capacity_max=80,
-        queue_threshold_ratio=0.35,
-        queue_threshold_min=1,
         wait_penalty_per_order_tick=0.0,
         expired_penalty=10.0,
         cancelled_penalty=8.0,
@@ -94,12 +87,12 @@ def test_wait_does_not_match_and_can_expire_order() -> None:
 def test_match_updates_order_vehicle_and_profit() -> None:
     env = make_env()
     install_single_order_vehicle(env, max_wait_ticks=2)
-    _obs, reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
+    _obs, reward, _terminated, _truncated, info = env.step(MATCH_FULL)
     assert env.orders[0].status == ORDER_MATCHED
     assert env.orders[0].matched_vehicle_id == 2
     assert env.vehicles[0].served_count == 1
     assert info["step_result"].accepted_count == 1
-    assert info["step_result"].dispatch_mode == "match_top_batch"
+    assert info["step_result"].dispatch_mode == "match_full"
     assert reward > 0.0
     assert info["step_result"].total_pickup_distance_km == env.orders[0].pickup_distance_km_est
     assert info["step_result"].mean_pickup_distance_km > 0.0
@@ -171,12 +164,12 @@ def test_dispatch_friction_breakdown_is_applied() -> None:
     )
     env.matcher.env_config = env.env_config
     install_single_order_vehicle(env, max_wait_ticks=2)
-    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
-    assert info["step_result"].dispatch_friction_cost == 5.0
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_FULL)
+    assert info["step_result"].dispatch_friction_cost == 10.0
     assert info["step_result"].dispatch_setup_cost == 3.0
     assert info["step_result"].dispatch_pair_coordination_cost == 2.0
-    assert info["step_result"].dispatch_full_mode_extra_cost == 0.0
-    assert info["step_result"].platform_profit == env.orders[0].realized_profit - 5.0
+    assert info["step_result"].dispatch_full_mode_extra_cost == 5.0
+    assert info["step_result"].platform_profit == env.orders[0].realized_profit - 10.0
 
 
 def test_full_mode_only_adds_extra_pair_friction() -> None:
@@ -217,12 +210,12 @@ def test_refresh_friction_decays_smoothly_after_recent_dispatch() -> None:
     )
     env.matcher.env_config = env.env_config
     install_single_order_vehicle(env, max_wait_ticks=2)
-    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_FULL)
     assert info["step_result"].dispatch_refresh_cost == 0.0
-    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_FULL)
     one_tick_cost = info["step_result"].dispatch_refresh_cost
     env.step(WAIT)
-    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_TOP_BATCH)
+    _obs, _reward, _terminated, _truncated, info = env.step(MATCH_FULL)
     assert 0.0 < info["step_result"].dispatch_refresh_cost < one_tick_cost
 
 
@@ -249,8 +242,7 @@ def test_observation_exposes_dispatch_timing_and_service_risk_features() -> None
     obs = env._observation()
     values = dict(zip(LEGACY_OBSERVATION_NAMES, obs))
     assert values["ticks_since_last_dispatch"] > 0.0
-    assert values["estimated_top_batch_friction"] > 0.0
-    assert values["estimated_full_match_friction"] > values["estimated_top_batch_friction"]
+    assert values["estimated_full_match_friction"] > 0.0
     assert values["near_deadline_order_share"] == 1.0
     assert values["projected_service_risk"] > 0.0
 
@@ -297,20 +289,6 @@ def test_wait_opportunity_bonus_rewards_candidate_gain_without_losses() -> None:
     loss_bonus = env._wait_opportunity_bonus(wait_penalty=0.0)
     assert bonus > 0.0
     assert loss_bonus == 0.0
-
-
-def test_wait_opportunity_teacher_waits_after_recent_dispatch() -> None:
-    env = make_env()
-    install_single_order_vehicle(env, max_wait_ticks=10)
-    env.dispatch_ticks = [0]
-    env.current_tick = 1
-    policy = WaitOpportunityTeacherPolicy()
-    assert policy.act(env, env._observation()) == WAIT
-
-
-def test_teacher_prefill_policies_include_full_match_rescue() -> None:
-    actions = {policy.act(make_env(), make_env()._observation()) for policy in teacher_policies()}
-    assert MATCH_FULL in actions
 
 
 def test_action_traces_record_wait_and_dispatch() -> None:

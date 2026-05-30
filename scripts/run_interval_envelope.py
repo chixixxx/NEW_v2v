@@ -12,15 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from future_v2v.algorithms.baselines import (
-    DeadlineTriggerPolicy,
-    FixedIntervalPolicy,
-    QueueThresholdPolicy,
-    ShortLookaheadTimingPolicy,
-    SupplyDemandPressurePolicy,
-)
+from future_v2v.algorithms.baselines import FixedIntervalPolicy, HandcraftedDeadlineRulePolicy
 from future_v2v.config import ProjectConfig, load_project_config, resolve_run_dir
-from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, FutureV2VTimingEnv
+from future_v2v.envs.timing_env import FutureV2VTimingEnv
 from future_v2v.metrics import EpisodeMetrics, summarize_metrics, write_csv
 from future_v2v.progress import progress
 
@@ -58,18 +52,11 @@ def main() -> None:
 
 def envelope_policies():
     return [
-        FixedIntervalPolicy(interval=1, match_action=MATCH_FULL),
-        FixedIntervalPolicy(interval=2, match_action=MATCH_FULL),
-        FixedIntervalPolicy(interval=3, match_action=MATCH_FULL),
-        FixedIntervalPolicy(interval=4, match_action=MATCH_FULL),
-        FixedIntervalPolicy(interval=1, match_action=MATCH_TOP_BATCH),
-        FixedIntervalPolicy(interval=2, match_action=MATCH_TOP_BATCH),
-        FixedIntervalPolicy(interval=3, match_action=MATCH_TOP_BATCH),
-        FixedIntervalPolicy(interval=4, match_action=MATCH_TOP_BATCH),
-        DeadlineTriggerPolicy(),
-        QueueThresholdPolicy(),
-        SupplyDemandPressurePolicy(),
-        ShortLookaheadTimingPolicy(),
+        FixedIntervalPolicy(interval=1),
+        FixedIntervalPolicy(interval=2),
+        FixedIntervalPolicy(interval=3),
+        FixedIntervalPolicy(interval=4),
+        HandcraftedDeadlineRulePolicy(),
     ]
 
 
@@ -353,8 +340,6 @@ def parse_interval(policy_name: str) -> int:
 def parse_match_mode(policy_name: str) -> str:
     if policy_name.endswith("full_match"):
         return "full"
-    if policy_name.endswith("top_batch"):
-        return "top_batch"
     return "rule"
 
 

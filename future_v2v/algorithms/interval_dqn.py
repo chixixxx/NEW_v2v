@@ -10,7 +10,7 @@ from typing import Callable
 import numpy as np
 import torch
 
-from future_v2v.algorithms.dqn import QNetwork, ReplayBuffer, Transition
+from future_v2v.algorithms.dqn_core import QNetwork, ReplayBuffer, Transition
 from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig
 from future_v2v.envs.timing_env import MATCH_FULL, WAIT, FutureV2VTimingEnv
 from future_v2v.progress import progress

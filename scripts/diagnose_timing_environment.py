@@ -12,16 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from future_v2v.algorithms.baselines import (
-    DeadlineTriggerPolicy,
-    FixedIntervalPolicy,
-    QueueThresholdPolicy,
-    ShortLookaheadTimingPolicy,
-    SupplyDemandPressurePolicy,
-    run_policy_episode,
-)
+from future_v2v.algorithms.baselines import FixedIntervalPolicy, HandcraftedDeadlineRulePolicy, run_policy_episode
 from future_v2v.config import ProjectConfig, load_project_config, resolve_run_dir
-from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, WAIT, FutureV2VTimingEnv
+from future_v2v.envs.timing_env import MATCH_FULL, WAIT, FutureV2VTimingEnv
 from future_v2v.metrics import EpisodeMetrics, summarize_metrics, write_csv
 from future_v2v.progress import progress
 
@@ -33,11 +26,8 @@ class OptionSpec:
 
 
 ORACLE_OPTIONS = [
-    OptionSpec("match_top_now", (MATCH_TOP_BATCH, WAIT, WAIT)),
     OptionSpec("match_full_now", (MATCH_FULL, WAIT, WAIT)),
-    OptionSpec("wait1_then_top", (WAIT, MATCH_TOP_BATCH, WAIT)),
     OptionSpec("wait1_then_full", (WAIT, MATCH_FULL, WAIT)),
-    OptionSpec("wait2_then_top", (WAIT, WAIT, MATCH_TOP_BATCH)),
     OptionSpec("wait2_then_full", (WAIT, WAIT, MATCH_FULL)),
 ]
 
@@ -155,7 +145,7 @@ def short_window_oracle_rows(
         while not (terminated or truncated):
             if env.current_tick in probe_ticks and env.snapshot().active_orders:
                 rows.append(evaluate_oracle_state(env, scenario))
-            action = MATCH_TOP_BATCH if env.snapshot().active_orders else WAIT
+            action = MATCH_FULL if env.snapshot().active_orders else WAIT
             _obs, _reward, terminated, truncated, _info = env.step(action)
     return rows
 
@@ -171,13 +161,8 @@ def selected_probe_ticks(horizon_ticks: int, *, max_probe_states: int) -> set[in
 def evaluate_oracle_state(env: FutureV2VTimingEnv, scenario: dict[str, object]) -> dict[str, object]:
     snapshot = env.snapshot()
     option_rewards = {option.name: rollout_option_reward(env, option) for option in ORACLE_OPTIONS}
-    now_best = max(option_rewards["match_top_now"], option_rewards["match_full_now"])
-    wait_best = max(
-        option_rewards["wait1_then_top"],
-        option_rewards["wait1_then_full"],
-        option_rewards["wait2_then_top"],
-        option_rewards["wait2_then_full"],
-    )
+    now_best = option_rewards["match_full_now"]
+    wait_best = max(option_rewards["wait1_then_full"], option_rewards["wait2_then_full"])
     best_option = max(option_rewards, key=option_rewards.get)
     waiting_ratios = [order.waiting_ratio(env.current_tick) for order in snapshot.active_orders]
     near_deadline_share = sum(
@@ -195,11 +180,8 @@ def evaluate_oracle_state(env: FutureV2VTimingEnv, scenario: dict[str, object]) 
         "candidate_edges": len(snapshot.candidate_edges),
         "mean_waiting_ratio": float(np.mean(waiting_ratios)) if waiting_ratios else 0.0,
         "near_deadline_share": near_deadline_share,
-        "match_top_now_reward": option_rewards["match_top_now"],
         "match_full_now_reward": option_rewards["match_full_now"],
-        "wait1_then_top_reward": option_rewards["wait1_then_top"],
         "wait1_then_full_reward": option_rewards["wait1_then_full"],
-        "wait2_then_top_reward": option_rewards["wait2_then_top"],
         "wait2_then_full_reward": option_rewards["wait2_then_full"],
         "best_option": best_option,
         "wait_best_reward": wait_best,
@@ -252,18 +234,11 @@ def fixed_interval_envelope_rows(
     manifest: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     policies = [
-        FixedIntervalPolicy(interval=1, match_action=MATCH_TOP_BATCH),
-        FixedIntervalPolicy(interval=1, match_action=MATCH_FULL),
-        FixedIntervalPolicy(interval=2, match_action=MATCH_TOP_BATCH),
-        FixedIntervalPolicy(interval=2, match_action=MATCH_FULL),
-        FixedIntervalPolicy(interval=3, match_action=MATCH_TOP_BATCH),
-        FixedIntervalPolicy(interval=3, match_action=MATCH_FULL),
-        FixedIntervalPolicy(interval=4, match_action=MATCH_TOP_BATCH),
-        FixedIntervalPolicy(interval=4, match_action=MATCH_FULL),
-        DeadlineTriggerPolicy(),
-        QueueThresholdPolicy(),
-        SupplyDemandPressurePolicy(),
-        ShortLookaheadTimingPolicy(),
+        FixedIntervalPolicy(interval=1),
+        FixedIntervalPolicy(interval=2),
+        FixedIntervalPolicy(interval=3),
+        FixedIntervalPolicy(interval=4),
+        HandcraftedDeadlineRulePolicy(),
     ]
     metrics: list[EpisodeMetrics] = []
     for scenario in progress(manifest, desc="fixed interval envelope", total=len(manifest), unit="scenario"):

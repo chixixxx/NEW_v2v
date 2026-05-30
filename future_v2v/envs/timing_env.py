@@ -23,12 +23,10 @@ from future_v2v.simulation.network import TLCManhattanZoneNetwork, ZoneNetwork
 from future_v2v.simulation.tlc_generator import TLCManhattanScenarioGenerator
 
 WAIT = 0
-MATCH_TOP_BATCH = 1
-MATCH_FULL = 2
-ACTION_COUNT = 3
+MATCH_FULL = 1
+ACTION_COUNT = 2
 ACTION_NAMES = {
     WAIT: "wait",
-    MATCH_TOP_BATCH: "match_top_batch",
     MATCH_FULL: "match_full",
 }
 
@@ -59,7 +57,6 @@ LEGACY_OBSERVATION_NAMES = (
     "mean_candidate_platform_margin",
     "energy_loss_rate_estimate",
     "ticks_since_last_dispatch",
-    "estimated_top_batch_friction",
     "estimated_full_match_friction",
     "time_bucket_off_peak",
     "time_bucket_morning_peak",
@@ -216,18 +213,16 @@ class FutureV2VTimingEnv:
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
         if action not in ACTION_NAMES:
-            raise ValueError(f"invalid action {action}; expected 0=WAIT, 1=MATCH_TOP_BATCH, 2=MATCH_FULL")
+            raise ValueError(f"invalid action {action}; expected 0=WAIT, 1=MATCH_FULL")
         self._refresh_vehicle_status()
         tick = self.current_tick
         before_snapshot = self.snapshot()
         risk_before = self.service_risk_potential()
         q_values = self._next_action_q_values
         self._next_action_q_values = None
-        result = StepResult(dispatch_executed=action in (MATCH_TOP_BATCH, MATCH_FULL), dispatch_mode=ACTION_NAMES[action])
-        if action in (MATCH_TOP_BATCH, MATCH_FULL):
-            dispatch_mode = "top_batch" if action == MATCH_TOP_BATCH else "full"
-            capacity = self._dispatch_capacity(before_snapshot) if action == MATCH_TOP_BATCH else len(before_snapshot.active_orders)
-            plan = self.matcher.solve(self.orders, self.vehicles, self.current_tick, dispatch_mode=dispatch_mode, capacity=capacity)
+        result = StepResult(dispatch_executed=action == MATCH_FULL, dispatch_mode=ACTION_NAMES[action])
+        if action == MATCH_FULL:
+            plan = self.matcher.solve(self.orders, self.vehicles, self.current_tick)
             realized = self.matcher.realize_matches(
                 plan.matches,
                 self.orders_by_id,
@@ -240,12 +235,12 @@ class FutureV2VTimingEnv:
             result.matched_count = len(realized)
             result.accepted_count = len(accepted)
             result.rejected_count = len(realized) - len(accepted)
-            result.dispatch_capacity = int(capacity)
+            result.dispatch_capacity = len(before_snapshot.active_orders)
             result.candidate_edge_count = len(plan.edges)
             result.gross_dispatch_profit = float(sum(match.realized_profit for match in accepted))
             self.compute_dispatch_friction(
                 result,
-                dispatch_mode=dispatch_mode,
+                dispatch_mode="full",
                 matched_count=result.matched_count,
                 tick=tick,
             )
@@ -567,16 +562,9 @@ class FutureV2VTimingEnv:
             if self.dispatch_ticks
             else self.scale_config.horizon_ticks
         )
-        top_capacity = self._dispatch_capacity(snapshot)
         edge_orders = {edge.order_id for edge in edges}
         edge_vehicles = {edge.vehicle_id for edge in edges}
         estimated_full_matches = min(len(edge_orders), len(edge_vehicles), order_count)
-        estimated_top_matches = min(estimated_full_matches, top_capacity)
-        top_friction = self.estimate_dispatch_friction(
-            dispatch_mode="top_batch",
-            matched_count=estimated_top_matches,
-            ticks_since_last_dispatch=ticks_since_last_dispatch,
-        )
         full_friction = self.estimate_dispatch_friction(
             dispatch_mode="full",
             matched_count=estimated_full_matches,
@@ -649,7 +637,6 @@ class FutureV2VTimingEnv:
                 else 0.0
             ),
             "ticks_since_last_dispatch": ticks_since_last_dispatch / max(1, self.scale_config.horizon_ticks),
-            "estimated_top_batch_friction": top_friction / 100.0,
             "estimated_full_match_friction": full_friction / 100.0,
             "time_bucket_off_peak": 1.0 if bucket == "off_peak" else 0.0,
             "time_bucket_morning_peak": 1.0 if bucket == "morning_peak" else 0.0,
@@ -885,11 +872,6 @@ class FutureV2VTimingEnv:
         )
         deadline_cost = self.env_config.expired_penalty * near_deadline
         return float(future_profit_proxy + 0.08 * current_profit - refresh_cost - deadline_cost)
-
-    def _dispatch_capacity(self, snapshot: EnvironmentSnapshot) -> int:
-        ratio = float(self.env_config.dispatch_capacity_ratio)
-        raw = int(np.ceil(len(snapshot.active_orders) * ratio))
-        return int(np.clip(raw, self.env_config.dispatch_capacity_min, self.env_config.dispatch_capacity_max))
 
     def _time_bucket_name(self) -> str:
         tick_day = self.scenario_start_tick_day + self.current_tick

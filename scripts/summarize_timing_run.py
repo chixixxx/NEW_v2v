@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 from future_v2v.config import load_project_config, resolve_run_dir
 
 
-PRIMARY_POLICIES = ["adaptive_interval_dqn", "dqn_adaptive_timing_legacy", "dqn_adaptive_timing"]
+PRIMARY_POLICIES = ["adaptive_interval_dqn"]
 FIXED1_POLICY = "fixed_1_tick_full_match"
 
 
@@ -49,22 +49,6 @@ def best_row(rows: list[dict[str, str]], metric: str) -> dict[str, str]:
     return max(rows, key=lambda row: to_float(row.get(metric)), default={})
 
 
-def latest_action_distribution(rows: list[dict[str, str]]) -> dict[str, float]:
-    if not rows:
-        return {"wait_rate": 0.0, "top_batch_rate": 0.0, "full_match_rate": 0.0, "total_actions": 0.0}
-    row = rows[-1]
-    wait = to_float(row.get("wait_count"))
-    top = to_float(row.get("top_batch_count"))
-    full = to_float(row.get("full_match_count"))
-    total = max(1.0, wait + top + full)
-    return {
-        "wait_rate": wait / total,
-        "top_batch_rate": top / total,
-        "full_match_rate": full / total,
-        "total_actions": total,
-    }
-
-
 def latest_interval_distribution(rows: list[dict[str, str]]) -> dict[str, float]:
     if not rows:
         return interval_distribution_from_counts({})
@@ -76,25 +60,6 @@ def latest_interval_distribution(rows: list[dict[str, str]]) -> dict[str, float]
         "delay_3_then_dispatch": to_float(row.get("delay_3_count")),
     }
     return interval_distribution_from_counts(counts)
-
-
-def eval_action_distribution(rows: list[dict[str, str]], policy_name: str) -> dict[str, float]:
-    counts = {"wait": 0.0, "match_top_batch": 0.0, "match_full": 0.0}
-    for row in rows:
-        if str(row.get("policy_name", "")) != policy_name:
-            continue
-        action = str(row.get("action_name", ""))
-        if action in counts:
-            counts[action] += 1.0
-    total = sum(counts.values())
-    if total <= 0.0:
-        return {"wait_rate": 0.0, "top_batch_rate": 0.0, "full_match_rate": 0.0, "total_actions": 0.0}
-    return {
-        "wait_rate": counts["wait"] / total,
-        "top_batch_rate": counts["match_top_batch"] / total,
-        "full_match_rate": counts["match_full"] / total,
-        "total_actions": total,
-    }
 
 
 def eval_interval_distribution(rows: list[dict[str, str]], policy_name: str) -> dict[str, float]:
@@ -171,9 +136,8 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
     paired = read_csv_rows(run_dir / "eval" / "paired_policy_delta_summary.csv")
     timing = read_csv_rows(run_dir / "eval" / "timing_policy_comparison.csv")
     sensitivity = read_csv_rows(run_dir / "eval" / "friction_sensitivity_summary.csv")
-    eval_actions = read_csv_rows(run_dir / "eval" / "action_trace_by_policy.csv")
+    friction_sensitivity_run = bool(sensitivity)
     interval_trace = read_csv_rows(run_dir / "eval" / "interval_policy_trace.csv")
-    train_actions = read_csv_rows(run_dir / "train" / "action_distribution.csv")
     train_interval_actions = read_csv_rows(run_dir / "train" / "interval_action_distribution.csv")
     validation = read_csv_rows(run_dir / "train" / "validation_history.csv")
 
@@ -183,16 +147,9 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
     best = best_row(eval_summary, "future_v2v_score_mean")
     dqn_pair = row_by(paired, "policy_name", primary_policy)
     dqn_timing = row_by(timing, "policy_name", primary_policy)
-    if primary_policy == "adaptive_interval_dqn":
-        interval_rates = eval_interval_distribution(interval_trace, primary_policy)
-        if interval_rates["total_interval_actions"] <= 0.0:
-            interval_rates = latest_interval_distribution(train_interval_actions)
-        action_rates = eval_action_distribution(eval_actions, primary_policy)
-    else:
-        interval_rates = interval_distribution_from_counts({})
-        action_rates = eval_action_distribution(eval_actions, primary_policy)
-        if action_rates["total_actions"] <= 0.0:
-            action_rates = latest_action_distribution(train_actions)
+    interval_rates = eval_interval_distribution(interval_trace, primary_policy)
+    if interval_rates["total_interval_actions"] <= 0.0:
+        interval_rates = latest_interval_distribution(train_interval_actions)
     val = validation_snapshot(validation)
 
     dqn_score = to_float(dqn.get("future_v2v_score_mean"))
@@ -211,34 +168,20 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
     common_fixed_delta = variant_delta(sensitivity, "common_fixed_cost")
     no_dispatch_delta = variant_delta(sensitivity, "no_dispatch_friction")
 
-    if primary_policy == "adaptive_interval_dqn":
-        status = diagnose_interval(
-            paired_delta=paired_delta,
-            best_gap=best_gap,
-            mean_batch_interval=mean_batch_interval,
-            service_rate=service_rate,
-            platform_profit=platform_profit,
-            no_refresh_delta=no_refresh_delta,
-            common_fixed_delta=common_fixed_delta,
-            interval_mean_action_interval=interval_rates["interval_mean_action_interval"],
-            interval_max_action_share=interval_rates["interval_max_action_share"],
-            off_peak_score=val["off_peak_score"],
-            off_peak_penalty=val["off_peak_floor_penalty"],
-        )
-    else:
-        status = diagnose(
-            paired_delta=paired_delta,
-            best_gap=best_gap,
-            wait_rate=action_rates["wait_rate"],
-            full_rate=action_rates["full_match_rate"],
-            mean_batch_interval=mean_batch_interval,
-            service_rate=service_rate,
-            platform_profit=platform_profit,
-            no_refresh_delta=no_refresh_delta,
-            common_fixed_delta=common_fixed_delta,
-            off_peak_score=val["off_peak_score"],
-            off_peak_penalty=val["off_peak_floor_penalty"],
-        )
+    status = diagnose_interval(
+        paired_delta=paired_delta,
+        best_gap=best_gap,
+        mean_batch_interval=mean_batch_interval,
+        service_rate=service_rate,
+        platform_profit=platform_profit,
+        no_refresh_delta=no_refresh_delta,
+        common_fixed_delta=common_fixed_delta,
+        friction_sensitivity_run=friction_sensitivity_run,
+        interval_mean_action_interval=interval_rates["interval_mean_action_interval"],
+        interval_max_action_share=interval_rates["interval_max_action_share"],
+        off_peak_score=val["off_peak_score"],
+        off_peak_penalty=val["off_peak_floor_penalty"],
+    )
 
     return {
         "run_dir": str(run_dir),
@@ -253,9 +196,6 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
         "dqn_service_rate": service_rate,
         "dqn_platform_profit": platform_profit,
         "dqn_mean_batch_interval": mean_batch_interval,
-        "dqn_wait_rate": action_rates["wait_rate"],
-        "dqn_top_batch_rate": action_rates["top_batch_rate"],
-        "dqn_full_match_rate": action_rates["full_match_rate"],
         "interval_dispatch_now_rate": interval_rates["dispatch_now_rate"],
         "interval_delay_1_rate": interval_rates["delay_1_rate"],
         "interval_delay_2_rate": interval_rates["delay_2_rate"],
@@ -269,6 +209,7 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
         "no_refresh_delta": no_refresh_delta,
         "common_fixed_delta": common_fixed_delta,
         "no_dispatch_delta": no_dispatch_delta,
+        "friction_sensitivity_run": friction_sensitivity_run,
         "diagnosis": status,
     }
 
@@ -276,42 +217,6 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
 def variant_delta(rows: list[dict[str, str]], variant: str) -> float:
     row = row_by(rows, "variant", variant)
     return to_float(row.get("paired_best_score_delta_mean"), to_float(row.get("best_score_delta_vs_fixed1")))
-
-
-def diagnose(
-    *,
-    paired_delta: float,
-    best_gap: float,
-    wait_rate: float,
-    full_rate: float,
-    mean_batch_interval: float,
-    service_rate: float,
-    platform_profit: float,
-    no_refresh_delta: float,
-    common_fixed_delta: float,
-    off_peak_score: float,
-    off_peak_penalty: float,
-) -> str:
-    notes: list[str] = []
-    if wait_rate < 0.15 or mean_batch_interval < 1.15:
-        notes.append("HIGH_FREQUENCY_DISPATCH: raise wait opportunity or loosen WAIT teacher threshold")
-    if wait_rate > 0.45 and (service_rate < 0.68 or platform_profit <= 0.0):
-        notes.append("OVER_WAITING: lower wait opportunity or raise service-risk delta weight")
-    if full_rate < 0.10 and service_rate < 0.72:
-        notes.append("FULL_RESCUE_WEAK: strengthen deadline/full rescue teacher samples")
-    if full_rate > 0.55 and mean_batch_interval < 1.15:
-        notes.append("FULL_DISPATCH_DEGENERACY: reduce full rescue weight and preserve top-batch samples")
-    if paired_delta > 0.0 and best_gap > 250.0:
-        notes.append("POLICY_WEAK_BUT_DIRECTION_OK: tune teacher replay and checkpoint selection before environment")
-    if no_refresh_delta <= 0.0 or common_fixed_delta <= 0.0:
-        notes.append("FRICTION_SENSITIVE: do not use as main result before environment review")
-    if off_peak_score < 0.0 or off_peak_penalty > 0.0:
-        notes.append("OFF_PEAK_RISK: checkpoint is not robust across validation buckets")
-    if not notes:
-        if paired_delta > 250.0 and best_gap < 180.0:
-            return "CANDIDATE_READY"
-        return "MINI_GATE_PASS_BUT_NOT_FORMAL"
-    return "; ".join(notes)
 
 
 def diagnose_interval(
@@ -327,6 +232,7 @@ def diagnose_interval(
     interval_max_action_share: float,
     off_peak_score: float,
     off_peak_penalty: float,
+    friction_sensitivity_run: bool = True,
 ) -> str:
     notes: list[str] = []
     if interval_mean_action_interval < 1.15 or mean_batch_interval < 1.15:
@@ -337,7 +243,7 @@ def diagnose_interval(
         notes.append("SINGLE_INTERVAL_DEGENERACY: action distribution is too concentrated")
     if paired_delta > 0.0 and best_gap > 250.0:
         notes.append("POLICY_WEAK_BUT_DIRECTION_OK: tune interval teacher and checkpoint selection")
-    if no_refresh_delta <= 0.0 or common_fixed_delta <= 0.0:
+    if friction_sensitivity_run and (no_refresh_delta <= 0.0 or common_fixed_delta <= 0.0):
         notes.append("FRICTION_SENSITIVE: do not use as main result before environment review")
     if off_peak_score < 0.0 or off_peak_penalty > 0.0:
         notes.append("OFF_PEAK_RISK: checkpoint is not robust across validation buckets")
@@ -364,9 +270,6 @@ def print_summary(summary: dict[str, object]) -> None:
         ("dqn_gap_to_best", fmt_float(summary["dqn_gap_to_best"], 2)),
         ("dqn_service_rate", fmt_float(summary["dqn_service_rate"], 3)),
         ("dqn_mean_batch_interval", fmt_float(summary["dqn_mean_batch_interval"], 3)),
-        ("dqn_wait_rate", fmt_float(summary["dqn_wait_rate"], 3)),
-        ("dqn_top_batch_rate", fmt_float(summary["dqn_top_batch_rate"], 3)),
-        ("dqn_full_match_rate", fmt_float(summary["dqn_full_match_rate"], 3)),
         ("interval_dispatch_now_rate", fmt_float(summary["interval_dispatch_now_rate"], 3)),
         ("interval_delay_1_rate", fmt_float(summary["interval_delay_1_rate"], 3)),
         ("interval_delay_2_rate", fmt_float(summary["interval_delay_2_rate"], 3)),
@@ -378,6 +281,7 @@ def print_summary(summary: dict[str, object]) -> None:
         ("no_refresh_delta", fmt_float(summary["no_refresh_delta"], 2)),
         ("common_fixed_delta", fmt_float(summary["common_fixed_delta"], 2)),
         ("no_dispatch_delta", fmt_float(summary["no_dispatch_delta"], 2)),
+        ("friction_sensitivity_run", str(summary["friction_sensitivity_run"])),
         ("diagnosis", str(summary["diagnosis"])),
     ]
     width = max(len(name) for name, _ in rows)

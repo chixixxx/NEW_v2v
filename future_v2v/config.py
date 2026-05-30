@@ -34,15 +34,9 @@ class DispatchFrictionConfig:
 @dataclass(frozen=True)
 class EnvironmentConfig:
     zone_count: int
-    action_space: str
     service_kwh_per_tick: float
     pickup_cap_minutes: float
     platform_pickup_cost_per_min: float
-    dispatch_capacity_ratio: float
-    dispatch_capacity_min: int
-    dispatch_capacity_max: int
-    queue_threshold_ratio: float
-    queue_threshold_min: int
     wait_penalty_per_order_tick: float
     expired_penalty: float
     cancelled_penalty: float
