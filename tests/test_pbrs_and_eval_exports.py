@@ -5,8 +5,13 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
+
 from future_v2v.algorithms.interval_dqn import AdaptiveIntervalDQNAgent, compute_pbrs_potential, execute_interval_action
+from future_v2v.algorithms.ppo import AdaptiveTimingPPOAgent, BINARY_ACTION_COUNT
+from future_v2v.algorithms.reward_shaping import shape_reward
 from future_v2v.config import TrainingConfig
+from future_v2v.envs.timing_env import MATCH_FULL, WAIT
 from tests.test_env_semantics import install_single_order_vehicle, make_env
 
 
@@ -66,10 +71,14 @@ def test_pbrs_zero_potential_equals_raw_reward() -> None:
     assert trace["pbrs_delta"] == 0.0
 
 
-def test_pbrs_uses_duration_discounted_potential_delta() -> None:
+def test_legacy_pbrs_terminal_mode_uses_duration_discounted_potential_delta() -> None:
     env = make_env()
     install_single_order_vehicle(env, max_wait_ticks=4)
-    training = make_training_config(reward_shaping_mode="pbrs", pbrs_clip=0.0)
+    training = make_training_config(
+        reward_shaping_mode="pbrs",
+        pbrs_clip=0.0,
+        pbrs_terminal_mode="zero_terminal_with_diagnostic",
+    )
     start_potential = compute_pbrs_potential(env, training)
     _obs, reward, terminated, truncated, duration, trace = execute_interval_action(
         env,
@@ -80,6 +89,92 @@ def test_pbrs_uses_duration_discounted_potential_delta() -> None:
     expected_delta = training.gamma**duration * end_potential - start_potential
     assert abs(float(trace["pbrs_delta"]) - expected_delta) < 1e-6
     assert abs(reward - (float(trace["raw_reward"]) + expected_delta)) < 1e-6
+
+
+def test_pbrs_terminal_correction_uses_initial_potential() -> None:
+    shaped = shape_reward(
+        raw_reward=10.0,
+        legacy_reward=8.0,
+        reward_mode="pbrs",
+        gamma=0.98,
+        duration=1,
+        potential_start=4.0,
+        potential_end=0.0,
+        potential_end_unclipped=7.0,
+        initial_potential=11.0,
+        terminal=True,
+        terminal_mode="finite_horizon_correction",
+    )
+    assert shaped.reward == 17.0
+    assert shaped.pbrs_delta == 7.0
+    assert shaped.terminal_correction == 11.0
+
+
+def test_finite_horizon_pbrs_telescopes_to_zero() -> None:
+    first = shape_reward(
+        raw_reward=1.0,
+        legacy_reward=1.0,
+        reward_mode="pbrs",
+        gamma=0.98,
+        duration=1,
+        potential_start=10.0,
+        potential_end=14.0,
+        potential_end_unclipped=14.0,
+        initial_potential=10.0,
+        terminal=False,
+        terminal_mode="finite_horizon_correction",
+    )
+    second = shape_reward(
+        raw_reward=2.0,
+        legacy_reward=2.0,
+        reward_mode="pbrs",
+        gamma=0.98,
+        duration=1,
+        potential_start=14.0,
+        potential_end=0.0,
+        potential_end_unclipped=9.0,
+        initial_potential=10.0,
+        terminal=True,
+        terminal_mode="finite_horizon_correction",
+    )
+    assert first.pbrs_delta + second.pbrs_delta == 0.0
+    assert first.reward + second.reward == 3.0
+
+
+def test_ppo_actor_critic_outputs_binary_actions() -> None:
+    training = make_training_config(agent_type="ppo")
+    agent = AdaptiveTimingPPOAgent(obs_dim=5, training_config=training, device="cpu")
+    obs = np.zeros(5, dtype=np.float32)
+    action, log_prob, value, probs, entropy = agent.act(obs, deterministic=True)
+    assert action in (WAIT, MATCH_FULL)
+    assert len(probs) == BINARY_ACTION_COUNT
+    assert abs(sum(probs) - 1.0) < 1e-6
+    assert isinstance(log_prob, float)
+    assert isinstance(value, float)
+    assert entropy >= 0.0
+
+
+def test_ppo_checkpoint_selection_penalizes_action_collapse() -> None:
+    training = make_training_config(
+        agent_type="ppo",
+        validation_action_balance_penalty=100.0,
+        validation_action_max_share_cap=0.85,
+        validation_interval_max_share_cap=0.75,
+        validation_min_mean_interval=1.15,
+        validation_max_mean_interval=2.45,
+    )
+    agent = AdaptiveTimingPPOAgent(obs_dim=3, training_config=training, device="cpu")
+    score, off_peak_penalty, action_penalty = agent._checkpoint_selection_score(
+        mean_score=100.0,
+        worst_bucket_score=80.0,
+        off_peak_score=0.0,
+        binary_max_action_share=1.0,
+        interval_max_share=1.0,
+        mean_interval=1.0,
+    )
+    assert off_peak_penalty == 0.0
+    assert action_penalty > 0.0
+    assert score < 97.0
 
 
 def test_checkpoint_rejects_observation_profile_mismatch(tmp_path: Path) -> None:

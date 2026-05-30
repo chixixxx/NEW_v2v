@@ -16,7 +16,7 @@ from scripts.run_experiment import run_eval, run_generate, run_report, run_train
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run PBRS reward-shaping ablation for Future V2V interval DQN.")
+    parser = argparse.ArgumentParser(description="Run PBRS reward-shaping ablation for Future V2V adaptive timing.")
     parser.add_argument("--scale", choices=["smoke", "main"], default="smoke")
     parser.add_argument("--config", default="configs/default.json")
     parser.add_argument("--run-name", default="pbrs_ablation")
@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-workers", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260529)
     parser.add_argument("--observation-profile", choices=["legacy_full", "compact_v2v"], default="compact_v2v")
+    parser.add_argument("--agent", choices=["ppo", "dqn"], default="ppo")
     return parser.parse_args()
 
 
@@ -43,6 +44,7 @@ def main() -> None:
             environment=replace(base_config.environment, observation_profile=args.observation_profile),
             training=replace(
                 base_config.training,
+                agent_type=args.agent,
                 reward_shaping_mode=mode,
                 observation_profile=args.observation_profile,
             ),
@@ -78,7 +80,7 @@ def _tag_rows(rows: list[dict[str, object]], mode: str) -> list[dict[str, object
 def _tag_eval_rows(rows: list[dict[str, object]], mode: str) -> list[dict[str, object]]:
     tagged = []
     for row in rows:
-        if row.get("policy_name") != "adaptive_interval_dqn":
+        if row.get("policy_name") not in {"adaptive_timing_ppo", "adaptive_interval_dqn"}:
             continue
         materialized = {"reward_shaping_mode": mode, "summary_source": "eval_summary"}
         materialized.update(row)

@@ -1,15 +1,14 @@
-# Future V2V Adaptive Timing
+﻿# Future V2V Adaptive Timing
 
-本项目研究双边 V2V 平台中的自适应批量匹配时机：强化学习选择匹配间隔，约束优化器统一决定具体 CV-DV 匹配边。默认主环境使用 NYC TLC 黄出租数据改造出的 Manhattan taxi-zone 级 Future V2V 场景；出租车数据只提供时空需求、OD 热点、行程时间和价格强度，V2V 的电量、等待窗口、报价、保留电量、SOC、电池健康和车辆供给仍由业务模型生成。
+本项目研究双边 V2V 平台中的自适应批量匹配时机：强化学习决定当前 tick 是继续等待还是触发完整匹配，约束优化器统一决定具体 CV-DV 匹配边。默认主环境使用 NYC TLC 黄出租数据改造出的 Manhattan taxi-zone 级 Future V2V 场景；出租车数据只提供时空需求、OD 热点、行程时间和价格强度，V2V 的电量、等待窗口、报价、保留电量、SOC、电池健康和车辆供给仍由业务模型生成。
 
 当前主线：
-
 - 1 tick = 3 分钟。
-- 主算法动作：立即匹配、延迟 1 步后匹配、延迟 2 步后匹配、延迟 3 步后匹配。
-- 底层环境动作只保留 `WAIT` 和 `MATCH_FULL`；旧三动作 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`、top-batch、queue、pressure、short-lookahead 和旧三动作 DQN 已下线。
-- 主评估表只保留固定 1/2/3/4 步完整匹配、手写强规则和 `adaptive_interval_dqn`。
-- `main` 约 4 小时决策窗口 + 42 分钟 terminal buffer；`smoke` 约 3 小时决策窗口 + 24 分钟 terminal buffer。
-- 默认训练使用 PBRS 奖励塑造和 `compact_v2v` 紧凑观测，最终评估指标不因奖励塑造改变。
+- 主算法是 `adaptive_timing_ppo`：二元动作 `WAIT / MATCH_FULL`，动态匹配间隔由连续 `WAIT` 后的下一次 `MATCH_FULL` 统计出来。
+- 底层匹配边只由同一个完整正收益约束优化器决定；强化学习不直接挑订单、车辆或匹配边。
+- `adaptive_interval_dqn` 保留为显式对照，不再作为默认主方法。
+- 主评估表只保留固定 1/2/3/4 步完整匹配、手写强规则和 `adaptive_timing_ppo`。
+- 默认训练使用有限时域 PBRS 和 `compact_v2v` 紧凑观测；奖励塑造只影响训练信号，不改变最终评估指标。
 - 电池健康与双边价格机制默认开启，传输效率、最低 SOC、安全可供电量、退化成本、卖方补偿和平台边际收益都会进入匹配约束与评估指标。
 
 准备 TLC Manhattan 缓存：
@@ -50,7 +49,6 @@ python -m ruff check future_v2v scripts tests
 ```
 
 更多说明：
-
 - `docs/research_design_zh.md`
 - `docs/environment_design_zh.md`
 - `docs/runbook_zh.md`

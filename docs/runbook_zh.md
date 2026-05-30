@@ -1,67 +1,51 @@
-# Future V2V 运行说明
+﻿# Future V2V 运行手册
 
-## 准备
+## 快速开始
 
-```bash
-cd C:\Sioux\future_v2v_adaptive_timing
-```
-
-依赖包括 `numpy`、`scipy`、`torch`、`pandas`、`pyarrow`、`pytest`、`ruff`、`tqdm`。
-
-若使用 TLC Manhattan 主环境，请将数据放到项目根目录：
-
-```text
-yellow_tripdata_2025-10.parquet
-taxi_zone_lookup.csv
-```
-
-预处理：
+准备 TLC Manhattan 缓存：
 
 ```bash
 python scripts/prepare_tlc_manhattan.py --month 2025-10
 ```
 
-没有 TLC 数据时，smoke 可回退到合成环境。
-
-## 主实验
-
-完整 smoke：
+烟测：
 
 ```bash
-python scripts/run_experiment.py --stage smoke --episodes 5 --eval-episodes 3 --rollout-workers 2 --eval-workers 2 --run-name smoke_adaptive_interval_v1
+python scripts/run_experiment.py --stage smoke --episodes 5 --eval-episodes 3 --rollout-workers 2 --eval-workers 2 --run-name smoke_ppo_v1
 ```
 
-完整 main：
+主实验：
 
 ```bash
-python scripts/run_experiment.py --stage all --scale main --rollout-workers 4 --eval-workers 4 --run-name adaptive_interval_main_v1
+python scripts/run_experiment.py --stage all --scale main --rollout-workers 4 --eval-workers 4 --run-name main_ppo_v1
 ```
 
-主规模默认使用 80 个固定评估场景。若 `outputs/<run_name>/env_health/eval_scenario_manifest.csv` 和 `env_health_summary.csv` 已存在且数量足够，`generate` 阶段会复用它们，不再重新抽取场景或重算环境健康。
+## 主方法
 
-分阶段运行：
+默认主算法为 `adaptive_timing_ppo`。动作空间是二元：
 
-```bash
-python scripts/run_experiment.py --stage generate --scale main --eval-episodes 8
-python scripts/run_experiment.py --stage train --scale main --rollout-workers 4
-python scripts/run_experiment.py --stage eval --scale main --eval-workers 4
-python scripts/run_experiment.py --stage report --scale main
+```text
+WAIT
+MATCH_FULL
 ```
 
-默认主算法为 `adaptive_interval_dqn`，即强化学习选择匹配间隔，约束优化器统一完成匹配。旧三动作深度 Q 网络只作为诊断基线。
+PPO 只决定此刻是否触发匹配；具体 CV-DV 匹配边始终由同一个约束优化器决定。动态匹配间隔由连续 `WAIT` 后触发 `MATCH_FULL` 的长度统计出来，而不是直接把 1/2/3/4 步做成动作。
+
+`adaptive_interval_dqn` 仍可通过配置 `training.agent_type = dqn` 或命令行 `--agent dqn` 运行，用作旧方法对照。主实验默认不评估 DQN 检查点，避免主表混杂。
 
 默认训练口径：
 
 ```text
+agent_type = ppo
 reward_shaping_mode = pbrs
+pbrs_terminal_mode = finite_horizon_correction
 observation_profile = compact_v2v
+ppo_eval_deterministic = false
 ```
 
-普通训练可以临时覆盖奖励塑造和观测配置：
+评估时 PPO 默认按固定随机种子从策略分布采样，而不是纯贪心取最大概率动作。原因是二元 PPO 的策略本身是随机策略，若用贪心评估，容易把 0.51 的匹配概率硬化成“每步匹配”。导出的 `match_probability`、`wait_probability`、动作分布和间隔分布用于解释策略。
 
-```bash
-python scripts/run_experiment.py --stage all --scale main --reward-shaping pbrs --observation-profile compact_v2v --run-name main_pbrs_compact_v1
-```
+## 对照与消融
 
 PBRS 对照实验会顺序运行 `none`、`legacy_delta` 和 `pbrs` 三组，并汇总训练曲线与评估摘要：
 
@@ -69,7 +53,13 @@ PBRS 对照实验会顺序运行 `none`、`legacy_delta` 和 `pbrs` 三组，并
 python scripts/run_pbrs_ablation.py --scale main --episodes 80 --eval-episodes 16 --rollout-workers 4 --eval-workers 4 --run-name pbrs_ablation_v1
 ```
 
-主评估表默认只保留 6 类策略：
+摩擦灵敏度不再随主实验默认运行，需要单独调用：
+
+```bash
+python scripts/run_friction_sensitivity.py --scale main --run-name main_latest --eval-workers 4
+```
+
+主评估表默认保留 6 类策略：
 
 ```text
 fixed_1_tick_full_match
@@ -77,15 +67,7 @@ fixed_2_tick_full_match
 fixed_3_tick_full_match
 fixed_4_tick_full_match
 handcrafted_deadline_rule
-adaptive_interval_dqn
-```
-
-旧的 top-batch、queue、pressure、short-lookahead 策略和旧三动作 DQN 已下线；主表只保留固定 1/2/3/4 步完整匹配、手写强规则和匹配间隔 DQN。
-
-摩擦灵敏度不再随主实验默认运行，需要单独调用：
-
-```bash
-python scripts/run_friction_sensitivity.py --scale main --run-name main_latest --eval-workers 4
+adaptive_timing_ppo
 ```
 
 ## 匹配步长诊断
@@ -106,7 +88,6 @@ outputs/<run_name>/env_diagnostics/pickup_distance_summary.csv
 ```
 
 重点看：
-
 - `fixed2_dominance_rate` 是否低于 70%。
 - `unique_best_interval_count` 是否至少为 2。
 - 不同时间、供需、风险、距离桶是否出现不同最佳步长。
@@ -127,10 +108,10 @@ python scripts/run_interval_envelope.py --scale main --eval-episodes 8 --config 
 训练评估后快速汇总：
 
 ```bash
-python scripts/summarize_timing_run.py --run-name adaptive_interval_main_v1 --scale main
+python scripts/summarize_timing_run.py --run-name main_ppo_v1 --scale main
 ```
 
-该脚本只读已有 CSV，不重新仿真。新主算法会优先读取 `adaptive_interval_dqn`、`interval_policy_trace.csv` 和 `interval_action_distribution.csv`。
+该脚本只读已有 CSV，不重新仿真。它会优先读取 `adaptive_timing_ppo`，并报告二元动作占比、动态间隔分布、相对固定 1 步的配对差值、与最佳策略差距、离峰风险和摩擦灵敏度状态。
 
 ## 常看输出
 
@@ -141,11 +122,11 @@ outputs/<run_name>/train/reward_shaping_history.csv
 outputs/<run_name>/train/training_curve_comparison.csv
 outputs/<run_name>/train/pbrs_ablation_summary.csv
 outputs/<run_name>/train/interval_action_distribution.csv
+outputs/<run_name>/train/validation_history.csv
 outputs/<run_name>/eval/eval_summary.csv
 outputs/<run_name>/eval/distance_adjusted_eval_summary.csv
 outputs/<run_name>/eval/timing_policy_comparison.csv
 outputs/<run_name>/eval/paired_policy_delta_summary.csv
-outputs/<run_name>/eval/friction_sensitivity_summary.csv
 outputs/<run_name>/eval/environment_acceptance_summary.csv
 outputs/<run_name>/eval/interval_policy_trace.csv
 outputs/<run_name>/eval/interval_action_distribution_by_policy.csv
@@ -162,4 +143,4 @@ python -m ruff check future_v2v scripts tests
 python -m pytest tests -q
 ```
 
-最小验收建议：先跑 smoke 包络诊断，再跑 main 小样本包络诊断；环境有步长多样性后，再跑 `adaptive_interval_dqn` 训练。
+最小验收建议：先跑 smoke，再跑 main 小样本。如果 PPO 的二元动作或动态间隔再次塌缩，再优先检查教师样本、熵系数、PBRS 势函数和 checkpoint 动作分布约束，不先改环境惩罚。

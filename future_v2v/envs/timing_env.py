@@ -137,6 +137,7 @@ class FutureV2VTimingEnv:
         self.scenario_day = ""
         self.scenario_start_tick_day = 0
         self.initial_reward_potential = 0.0
+        self.training_initial_potential = 0.0
 
     @property
     def observation_dim(self) -> int:
@@ -202,6 +203,7 @@ class FutureV2VTimingEnv:
         self.scenario_start_tick_day = int(scenario.start_tick_day)
         obs = self._observation()
         self.initial_reward_potential = self.state_potential_proxy()
+        self.training_initial_potential = self.initial_reward_potential
         return obs, {
             "seed": self.seed,
             "observation_names": self.observation_names,

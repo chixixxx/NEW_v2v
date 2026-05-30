@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from future_v2v.algorithms.dqn_core import QNetwork, ReplayBuffer, Transition
+from future_v2v.algorithms.reward_shaping import compute_pbrs_potential, shape_reward
 from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig
 from future_v2v.envs.timing_env import MATCH_FULL, WAIT, FutureV2VTimingEnv
 from future_v2v.progress import progress
@@ -497,6 +498,8 @@ def execute_interval_action(
     start_orders = len(start_snapshot.active_orders)
     state_action_features = env.state_action_features(start_snapshot)
     potential_start = compute_pbrs_potential(env, training_config, start_snapshot) if training_config else 0.0
+    if training_config and start_tick == 0:
+        env.training_initial_potential = potential_start
     raw_reward_sum = 0.0
     legacy_reward_sum = 0.0
     duration = 0
@@ -524,19 +527,21 @@ def execute_interval_action(
     potential_end_unclipped = compute_pbrs_potential(env, training_config) if training_config else 0.0
     terminal = terminated or truncated
     potential_end = 0.0 if terminal else potential_end_unclipped
-    discount = (float(training_config.gamma) ** max(1, duration)) if training_config else 1.0
-    pbrs_delta = discount * potential_end - potential_start
-    if reward_mode == "none":
-        total_reward = raw_reward_sum
-    elif reward_mode == "legacy_delta":
-        total_reward = legacy_reward_sum
-    elif reward_mode == "pbrs":
-        total_reward = raw_reward_sum + pbrs_delta
-    else:
-        raise ValueError(f"unknown reward_shaping_mode={reward_mode!r}; expected none, legacy_delta, or pbrs")
-    terminal_diagnostic = ""
-    if terminal and training_config and training_config.pbrs_terminal_mode == "zero_terminal_with_diagnostic":
-        terminal_diagnostic = raw_reward_sum - potential_start + env.initial_reward_potential
+    shaped = shape_reward(
+        raw_reward=raw_reward_sum,
+        legacy_reward=legacy_reward_sum,
+        reward_mode=reward_mode,
+        gamma=float(training_config.gamma) if training_config else 1.0,
+        duration=duration,
+        potential_start=potential_start,
+        potential_end=potential_end,
+        potential_end_unclipped=potential_end_unclipped,
+        initial_potential=float(getattr(env, "training_initial_potential", potential_start)),
+        terminal=terminal,
+        terminal_mode=training_config.pbrs_terminal_mode if training_config else "finite_horizon_correction",
+    )
+    total_reward = shaped.reward
+    pbrs_delta = shaped.pbrs_delta
     trace_row = {
         "start_tick": start_tick,
         "end_tick": end_tick,
@@ -555,38 +560,13 @@ def execute_interval_action(
         "potential_end": potential_end,
         "potential_end_unclipped": potential_end_unclipped,
         "pbrs_delta": pbrs_delta,
-        "finite_horizon_terminal_reward_diagnostic": terminal_diagnostic,
+        "finite_horizon_terminal_correction": shaped.terminal_correction,
     }
     trace_row.update(state_action_features)
     if q_values is not None:
         for idx, value in enumerate(q_values):
             trace_row[f"q_interval_{idx}"] = float(value)
     return obs, float(total_reward), terminated, truncated, max(1, duration), trace_row
-
-
-def compute_pbrs_potential(
-    env: FutureV2VTimingEnv,
-    training_config: TrainingConfig | None,
-    snapshot=None,
-) -> float:
-    if training_config is None:
-        return 0.0
-    values = env._state_feature_values(snapshot)
-    potential = (
-        training_config.potential_candidate_margin_weight * values["candidate_margin_proxy_raw"]
-        + training_config.potential_feasible_density_weight * values["feasible_edge_density_raw"]
-        + training_config.potential_urgent_coverage_weight * values["urgent_feasible_coverage"]
-        - training_config.potential_pickup_time_weight * values["mean_pickup_time_est_raw"]
-        - training_config.potential_pickup_distance_weight * values["mean_pickup_distance_est_raw"]
-        - training_config.potential_service_risk_weight * values["service_risk_potential_raw"]
-        - training_config.potential_urgent_service_risk_weight * values["projected_urgent_service_risk"]
-        - training_config.potential_near_deadline_weight * values["near_deadline_order_share_raw"]
-        - training_config.potential_soc_binding_weight * values["soc_safety_binding_rate"]
-    )
-    if training_config.pbrs_clip > 0:
-        potential = float(np.clip(potential, -training_config.pbrs_clip, training_config.pbrs_clip))
-    return float(potential)
-
 
 def interval_teacher_action(env: FutureV2VTimingEnv) -> int:
     snapshot = env.snapshot()

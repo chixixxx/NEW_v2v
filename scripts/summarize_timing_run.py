@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 from future_v2v.config import load_project_config, resolve_run_dir
 
 
-PRIMARY_POLICIES = ["adaptive_interval_dqn"]
+PRIMARY_POLICIES = ["adaptive_timing_ppo", "adaptive_interval_dqn"]
 FIXED1_POLICY = "fixed_1_tick_full_match"
 
 
@@ -58,8 +58,18 @@ def latest_interval_distribution(rows: list[dict[str, str]]) -> dict[str, float]
         "delay_1_then_dispatch": to_float(row.get("delay_1_count")),
         "delay_2_then_dispatch": to_float(row.get("delay_2_count")),
         "delay_3_then_dispatch": to_float(row.get("delay_3_count")),
+        "delay_4_plus_then_dispatch": to_float(row.get("delay_4_plus_count")),
     }
-    return interval_distribution_from_counts(counts)
+    distribution = interval_distribution_from_counts(counts)
+    decision_total = to_float(row.get("wait_action_count")) + to_float(row.get("match_full_action_count"))
+    if decision_total > 0.0:
+        distribution["wait_action_rate"] = to_float(row.get("wait_action_count")) / decision_total
+        distribution["match_full_action_rate"] = to_float(row.get("match_full_action_count")) / decision_total
+        distribution["binary_max_action_share"] = max(
+            distribution["wait_action_rate"],
+            distribution["match_full_action_rate"],
+        )
+    return distribution
 
 
 def eval_interval_distribution(rows: list[dict[str, str]], policy_name: str) -> dict[str, float]:
@@ -68,14 +78,26 @@ def eval_interval_distribution(rows: list[dict[str, str]], policy_name: str) -> 
         "delay_1_then_dispatch": 0.0,
         "delay_2_then_dispatch": 0.0,
         "delay_3_then_dispatch": 0.0,
+        "delay_4_plus_then_dispatch": 0.0,
     }
+    binary_counts = {"wait": 0.0, "match_full": 0.0}
     for row in rows:
         if str(row.get("policy_name", "")) != policy_name:
             continue
+        binary_action = str(row.get("binary_action_name", ""))
+        if binary_action in binary_counts:
+            binary_counts[binary_action] += 1.0
         action = str(row.get("interval_action_name", ""))
-        if action in counts:
+        final_dispatch = str(row.get("final_dispatch_executed", "True"))
+        if action in counts and final_dispatch in {"True", "true", "1"}:
             counts[action] += 1.0
-    return interval_distribution_from_counts(counts)
+    distribution = interval_distribution_from_counts(counts)
+    decision_total = binary_counts["wait"] + binary_counts["match_full"]
+    if decision_total > 0.0:
+        distribution["wait_action_rate"] = binary_counts["wait"] / decision_total
+        distribution["match_full_action_rate"] = binary_counts["match_full"] / decision_total
+        distribution["binary_max_action_share"] = max(binary_counts.values()) / decision_total
+    return distribution
 
 
 def interval_distribution_from_counts(counts: dict[str, float]) -> dict[str, float]:
@@ -83,25 +105,34 @@ def interval_distribution_from_counts(counts: dict[str, float]) -> dict[str, flo
     delay_1 = counts.get("delay_1_then_dispatch", 0.0)
     delay_2 = counts.get("delay_2_then_dispatch", 0.0)
     delay_3 = counts.get("delay_3_then_dispatch", 0.0)
-    total = dispatch_now + delay_1 + delay_2 + delay_3
+    delay_4_plus = counts.get("delay_4_plus_then_dispatch", 0.0)
+    total = dispatch_now + delay_1 + delay_2 + delay_3 + delay_4_plus
     if total <= 0.0:
         return {
+            "wait_action_rate": 0.0,
+            "match_full_action_rate": 0.0,
             "dispatch_now_rate": 0.0,
             "delay_1_rate": 0.0,
             "delay_2_rate": 0.0,
             "delay_3_rate": 0.0,
+            "delay_4_plus_rate": 0.0,
             "interval_max_action_share": 0.0,
+            "binary_max_action_share": 0.0,
             "interval_mean_action_interval": 0.0,
             "total_interval_actions": 0.0,
         }
-    rates = [dispatch_now / total, delay_1 / total, delay_2 / total, delay_3 / total]
+    rates = [dispatch_now / total, delay_1 / total, delay_2 / total, delay_3 / total, delay_4_plus / total]
     return {
+        "wait_action_rate": 0.0,
+        "match_full_action_rate": 0.0,
         "dispatch_now_rate": rates[0],
         "delay_1_rate": rates[1],
         "delay_2_rate": rates[2],
         "delay_3_rate": rates[3],
+        "delay_4_plus_rate": rates[4],
         "interval_max_action_share": max(rates),
-        "interval_mean_action_interval": 1.0 + (delay_1 + 2.0 * delay_2 + 3.0 * delay_3) / total,
+        "binary_max_action_share": 0.0,
+        "interval_mean_action_interval": 1.0 + (delay_1 + 2.0 * delay_2 + 3.0 * delay_3 + 4.0 * delay_4_plus) / total,
         "total_interval_actions": total,
     }
 
@@ -179,6 +210,7 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
         friction_sensitivity_run=friction_sensitivity_run,
         interval_mean_action_interval=interval_rates["interval_mean_action_interval"],
         interval_max_action_share=interval_rates["interval_max_action_share"],
+        binary_max_action_share=interval_rates.get("binary_max_action_share", 0.0),
         off_peak_score=val["off_peak_score"],
         off_peak_penalty=val["off_peak_floor_penalty"],
     )
@@ -197,11 +229,15 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
         "dqn_platform_profit": platform_profit,
         "dqn_mean_batch_interval": mean_batch_interval,
         "interval_dispatch_now_rate": interval_rates["dispatch_now_rate"],
+        "wait_action_rate": interval_rates["wait_action_rate"],
+        "match_full_action_rate": interval_rates["match_full_action_rate"],
         "interval_delay_1_rate": interval_rates["delay_1_rate"],
         "interval_delay_2_rate": interval_rates["delay_2_rate"],
         "interval_delay_3_rate": interval_rates["delay_3_rate"],
+        "interval_delay_4_plus_rate": interval_rates["delay_4_plus_rate"],
         "interval_mean_action_interval": interval_rates["interval_mean_action_interval"],
         "interval_max_action_share": interval_rates["interval_max_action_share"],
+        "binary_max_action_share": interval_rates["binary_max_action_share"],
         "validation_score": val["validation_score"],
         "validation_off_peak_score": val["off_peak_score"],
         "validation_worst_bucket_score": val["worst_bucket_score"],
@@ -233,6 +269,7 @@ def diagnose_interval(
     off_peak_score: float,
     off_peak_penalty: float,
     friction_sensitivity_run: bool = True,
+    binary_max_action_share: float = 0.0,
 ) -> str:
     notes: list[str] = []
     if interval_mean_action_interval < 1.15 or mean_batch_interval < 1.15:
@@ -241,6 +278,8 @@ def diagnose_interval(
         notes.append("INTERVAL_TOO_LONG: strengthen immediate dispatch rescue states")
     if interval_max_action_share > 0.75:
         notes.append("SINGLE_INTERVAL_DEGENERACY: action distribution is too concentrated")
+    if binary_max_action_share > 0.90:
+        notes.append("BINARY_ACTION_COLLAPSE: WAIT/MATCH policy is too concentrated")
     if paired_delta > 0.0 and best_gap > 250.0:
         notes.append("POLICY_WEAK_BUT_DIRECTION_OK: tune interval teacher and checkpoint selection")
     if friction_sensitivity_run and (no_refresh_delta <= 0.0 or common_fixed_delta <= 0.0):
@@ -270,12 +309,16 @@ def print_summary(summary: dict[str, object]) -> None:
         ("dqn_gap_to_best", fmt_float(summary["dqn_gap_to_best"], 2)),
         ("dqn_service_rate", fmt_float(summary["dqn_service_rate"], 3)),
         ("dqn_mean_batch_interval", fmt_float(summary["dqn_mean_batch_interval"], 3)),
+        ("wait_action_rate", fmt_float(summary["wait_action_rate"], 3)),
+        ("match_full_action_rate", fmt_float(summary["match_full_action_rate"], 3)),
         ("interval_dispatch_now_rate", fmt_float(summary["interval_dispatch_now_rate"], 3)),
         ("interval_delay_1_rate", fmt_float(summary["interval_delay_1_rate"], 3)),
         ("interval_delay_2_rate", fmt_float(summary["interval_delay_2_rate"], 3)),
         ("interval_delay_3_rate", fmt_float(summary["interval_delay_3_rate"], 3)),
+        ("interval_delay_4_plus_rate", fmt_float(summary["interval_delay_4_plus_rate"], 3)),
         ("interval_mean_action_interval", fmt_float(summary["interval_mean_action_interval"], 3)),
         ("interval_max_action_share", fmt_float(summary["interval_max_action_share"], 3)),
+        ("binary_max_action_share", fmt_float(summary["binary_max_action_share"], 3)),
         ("validation_off_peak_score", fmt_float(summary["validation_off_peak_score"], 2)),
         ("validation_worst_bucket_score", fmt_float(summary["validation_worst_bucket_score"], 2)),
         ("no_refresh_delta", fmt_float(summary["no_refresh_delta"], 2)),

@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from future_v2v.algorithms.baselines import TimingPolicy, default_baselines, policy_from_name, run_policy_episode
 from future_v2v.algorithms.interval_dqn import AdaptiveIntervalDQNAgent
+from future_v2v.algorithms.ppo import AdaptiveTimingPPOAgent
 from future_v2v.config import DispatchFrictionConfig, ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
 from future_v2v.metrics import summarize_metrics, write_csv
@@ -31,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-episodes", type=int, default=None, help="Override evaluation episodes.")
     parser.add_argument("--rollout-workers", type=int, default=None, help="Parallel rollout workers for DQN training.")
     parser.add_argument("--eval-workers", type=int, default=1, help="Parallel workers for evaluation.")
+    parser.add_argument("--agent", choices=["ppo", "dqn"], default=None, help="Training agent. Default comes from config.")
     parser.add_argument("--seed", type=int, default=20260529)
     parser.add_argument("--reward-shaping", choices=["none", "legacy_delta", "pbrs"], default=None)
     parser.add_argument("--observation-profile", choices=["legacy_full", "compact_v2v"], default=None)
@@ -47,6 +49,8 @@ def apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Proj
     environment = config.environment
     if args.reward_shaping is not None:
         training = replace(training, reward_shaping_mode=args.reward_shaping)
+    if args.agent is not None:
+        training = replace(training, agent_type=args.agent)
     if args.observation_profile is not None:
         training = replace(training, observation_profile=args.observation_profile)
         environment = replace(environment, observation_profile=args.observation_profile)
@@ -114,7 +118,18 @@ def run_train(
     obs, _ = env.reset(seed=seed)
     train_episodes = episodes or config.scale(scale_name).train_episodes
     worker_count = max(1, int(rollout_workers or config.training.rollout_workers))
-    agent = AdaptiveIntervalDQNAgent(obs_dim=len(obs), training_config=config.training)
+    if config.training.agent_type == "ppo":
+        agent = AdaptiveTimingPPOAgent(obs_dim=len(obs), training_config=config.training)
+        checkpoint_path = run_dir / "train" / "adaptive_timing_ppo_agent.pt"
+        train_title = f"PPO Timing Training ({scale_name})"
+        method_line = "训练目标是学习 WAIT / MATCH_FULL 二元动作；动态匹配间隔由连续 WAIT 自然形成。"
+    elif config.training.agent_type == "dqn":
+        agent = AdaptiveIntervalDQNAgent(obs_dim=len(obs), training_config=config.training)
+        checkpoint_path = run_dir / "train" / "adaptive_interval_dqn_agent.pt"
+        train_title = f"DQN Timing Training ({scale_name})"
+        method_line = "训练目标是学习固定步长选项；该路径保留为 DQN 对照。"
+    else:
+        raise ValueError(f"unknown training.agent_type={config.training.agent_type!r}; expected ppo or dqn")
     history = agent.train(
         env_factory,
         episodes=train_episodes,
@@ -129,12 +144,12 @@ def run_train(
     write_csv(run_dir / "train" / "pbrs_ablation_summary.csv", _pbrs_ablation_summary_rows(history, config.training.reward_shaping_mode))
     write_csv(run_dir / "train" / "validation_history.csv", agent.validation_history)
     write_csv(run_dir / "train" / "interval_action_distribution.csv", _interval_action_distribution_rows(history))
-    agent.save(run_dir / "train" / "adaptive_interval_dqn_agent.pt")
+    agent.save(checkpoint_path)
     write_markdown_report(
         run_dir / "train" / "train_report.md",
-        title=f"DQN Timing Training ({scale_name})",
+        title=train_title,
         summary_lines=[
-            "训练目标是学习匹配间隔；匹配边仍由约束优化器决定。",
+            method_line,
             f"episodes={train_episodes}, replay_prefill={config.training.teacher_prefill_episodes}, rollout_workers={worker_count}",
             f"validation_episodes={config.training.validation_episodes}, checkpoint_metric={config.training.checkpoint_selection_metric}",
         ],
@@ -155,8 +170,11 @@ def run_eval(
     count = eval_episodes or scale.eval_episodes
     manifest_rows = _load_or_build_eval_manifest(config, scale_name, run_dir, seed=seed, count=count)
     policy_specs: list[tuple[str, str]] = [("baseline", policy.name) for policy in default_baselines()]
+    ppo_checkpoint = run_dir / "train" / "adaptive_timing_ppo_agent.pt"
+    if ppo_checkpoint.exists():
+        policy_specs.append(("ppo", str(ppo_checkpoint)))
     interval_checkpoint = run_dir / "train" / "adaptive_interval_dqn_agent.pt"
-    if interval_checkpoint.exists():
+    if config.training.agent_type == "dqn" and interval_checkpoint.exists():
         policy_specs.append(("interval_dqn", str(interval_checkpoint)))
     results = _evaluate_policy_specs(
         config,
@@ -286,6 +304,38 @@ def _run_eval_task(
     kind, value = policy_spec
     if kind == "baseline":
         policy = policy_from_name(value)
+    elif kind == "ppo":
+        obs, _ = _reset_eval_env(env, scenario)
+        policy = AdaptiveTimingPPOAgent.load(Path(value), config.training)
+        interval_trace = policy.run_eval_episode(env, obs)
+        metrics = env.episode_metrics(policy_name=policy.name, seed=seed)
+        return {
+            "metrics": metrics,
+            "action_trace": _tag_trace_rows(
+                env.action_trace,
+                policy_name=metrics.policy_name,
+                seed=seed,
+                scenario_id=metrics.scenario_id,
+            ),
+            "dispatch_trace": _tag_trace_rows(
+                env.dispatch_trace,
+                policy_name=metrics.policy_name,
+                seed=seed,
+                scenario_id=metrics.scenario_id,
+            ),
+            "wait_tradeoff_trace": _tag_trace_rows(
+                env.wait_tradeoff_trace,
+                policy_name=metrics.policy_name,
+                seed=seed,
+                scenario_id=metrics.scenario_id,
+            ),
+            "interval_trace": _tag_trace_rows(
+                interval_trace,
+                policy_name=metrics.policy_name,
+                seed=seed,
+                scenario_id=metrics.scenario_id,
+            ),
+        }
     elif kind == "interval_dqn":
         obs, _ = _reset_eval_env(env, scenario)
         policy = AdaptiveIntervalDQNAgent.load(Path(value), config.training)
@@ -391,11 +441,18 @@ def _interval_action_distribution_rows(history: list[dict[str, float | int]]) ->
     return [
         {
             "episode": row["episode"],
+            "wait_action_count": row.get("wait_action_count", 0),
+            "match_full_action_count": row.get("match_full_action_count", 0),
+            "wait_action_share": row.get("wait_action_share", 0.0),
+            "match_full_action_share": row.get("match_full_action_share", 0.0),
             "dispatch_now_count": row.get("interval_dispatch_now_count", 0),
             "delay_1_count": row.get("interval_delay_1_count", 0),
             "delay_2_count": row.get("interval_delay_2_count", 0),
             "delay_3_count": row.get("interval_delay_3_count", 0),
+            "delay_4_plus_count": row.get("interval_delay_4_plus_count", 0),
             "delay_2_share": row.get("interval_delay_2_share", 0.0),
+            "mean_action_interval": row.get("interval_mean_action_interval", 0.0),
+            "interval_max_action_share": row.get("interval_max_action_share", 0.0),
         }
         for row in history
     ]
@@ -412,6 +469,10 @@ def _reward_shaping_history_rows(history: list[dict[str, float | int]]) -> list[
             "potential_delta_sum": row.get("potential_delta_sum", 0.0),
             "episode_score": row.get("future_v2v_score", 0.0),
             "service_rate": row.get("service_rate", 0.0),
+            "wait_action_count": row.get("wait_action_count", 0),
+            "match_full_action_count": row.get("match_full_action_count", 0),
+            "wait_action_share": row.get("wait_action_share", 0.0),
+            "match_full_action_share": row.get("match_full_action_share", 0.0),
             "dispatch_now_count": row.get("interval_dispatch_now_count", 0),
             "delay_1_count": row.get("interval_delay_1_count", 0),
             "delay_2_count": row.get("interval_delay_2_count", 0),
@@ -483,24 +544,38 @@ def _distance_adjusted_summary_rows(summary_rows: list[dict[str, float | str]]) 
 
 def _interval_action_distribution_by_policy(interval_rows: list[dict[str, object]]) -> list[dict[str, object]]:
     counts: dict[str, dict[str, int]] = {}
+    binary_counts: dict[str, dict[str, int]] = {}
     for row in interval_rows:
         policy = str(row.get("policy_name", ""))
         action = str(row.get("interval_action_name", ""))
-        if not policy or not action:
+        binary_action = str(row.get("binary_action_name", ""))
+        if policy and binary_action:
+            bucket = binary_counts.setdefault(policy, {})
+            bucket[binary_action] = bucket.get(binary_action, 0) + 1
+        if not policy or not action or row.get("final_dispatch_executed") is not True:
             continue
-        counts.setdefault(policy, {})[action] = counts.setdefault(policy, {}).get(action, 0) + 1
+        bucket = counts.setdefault(policy, {})
+        bucket[action] = bucket.get(action, 0) + 1
     rows = []
-    for policy, action_counts in sorted(counts.items()):
+    for policy in sorted(set(counts) | set(binary_counts)):
+        action_counts = counts.get(policy, {})
+        decision_counts = binary_counts.get(policy, {})
         total = sum(action_counts.values())
+        decision_total = sum(decision_counts.values())
         rows.append(
             {
                 "policy_name": policy,
+                "total_decisions": decision_total,
                 "total_interval_actions": total,
+                "wait_action_share": decision_counts.get("wait", 0) / max(1, decision_total),
+                "match_full_action_share": decision_counts.get("match_full", 0) / max(1, decision_total),
                 "dispatch_now_share": action_counts.get("dispatch_now", 0) / max(1, total),
                 "delay_1_share": action_counts.get("delay_1_then_dispatch", 0) / max(1, total),
                 "delay_2_share": action_counts.get("delay_2_then_dispatch", 0) / max(1, total),
                 "delay_3_share": action_counts.get("delay_3_then_dispatch", 0) / max(1, total),
+                "delay_4_plus_share": action_counts.get("delay_4_plus_then_dispatch", 0) / max(1, total),
                 "max_action_share": max(action_counts.values(), default=0) / max(1, total),
+                "binary_max_action_share": max(decision_counts.values(), default=0) / max(1, decision_total),
             }
         )
     return rows
@@ -511,9 +586,12 @@ def _interval_distribution_histogram(interval_rows: list[dict[str, object]]) -> 
     totals: dict[str, int] = {}
     for row in interval_rows:
         policy = str(row.get("policy_name", ""))
-        if not policy:
+        if not policy or row.get("final_dispatch_executed") is not True:
             continue
-        interval = int(float(row.get("delay_ticks", 0))) + 1
+        delay_value = row.get("delay_ticks", 0)
+        if delay_value == "":
+            continue
+        interval = int(float(delay_value)) + 1
         counts[(policy, interval)] = counts.get((policy, interval), 0) + 1
         totals[policy] = totals.get(policy, 0) + 1
     return [
@@ -533,8 +611,12 @@ def _state_action_policy_trace(interval_rows: list[dict[str, object]]) -> list[d
         "seed",
         "scenario_id",
         "start_tick",
+        "binary_action_name",
+        "match_probability",
+        "wait_probability",
         "interval_action_name",
         "delay_ticks",
+        "final_dispatch_executed",
         "active_orders",
         "available_vehicles",
         "supply_demand_ratio",
@@ -547,6 +629,8 @@ def _state_action_policy_trace(interval_rows: list[dict[str, object]]) -> list[d
         "raw_reward",
         "shaped_reward",
         "pbrs_delta",
+        "value_estimate",
+        "entropy",
     ]
     return [{field: row.get(field, "") for field in fields} for row in interval_rows]
 
@@ -568,9 +652,14 @@ def _state_action_bucket_summary(interval_rows: list[dict[str, object]]) -> list
         policy, order_bucket, vehicle_bucket, sd_bucket, deadline_bucket, density_bucket = key
         total = len(values)
         action_counts: dict[str, int] = {}
+        binary_counts: dict[str, int] = {}
         for row in values:
             action = str(row.get("interval_action_name", ""))
-            action_counts[action] = action_counts.get(action, 0) + 1
+            if action:
+                action_counts[action] = action_counts.get(action, 0) + 1
+            binary_action = str(row.get("binary_action_name", ""))
+            if binary_action:
+                binary_counts[binary_action] = binary_counts.get(binary_action, 0) + 1
         rows.append(
             {
                 "policy_name": policy,
@@ -580,10 +669,16 @@ def _state_action_bucket_summary(interval_rows: list[dict[str, object]]) -> list
                 "near_deadline_bucket": deadline_bucket,
                 "candidate_density_bucket": density_bucket,
                 "sample_count": total,
+                "wait_action_share": binary_counts.get("wait", 0) / max(1, total),
+                "match_full_action_share": binary_counts.get("match_full", 0) / max(1, total),
+                "mean_match_probability": _mean(
+                    [float(row.get("match_probability", 0.0)) for row in values if row.get("match_probability", "") != ""]
+                ),
                 "dispatch_now_share": action_counts.get("dispatch_now", 0) / max(1, total),
                 "delay_1_share": action_counts.get("delay_1_then_dispatch", 0) / max(1, total),
                 "delay_2_share": action_counts.get("delay_2_then_dispatch", 0) / max(1, total),
                 "delay_3_share": action_counts.get("delay_3_then_dispatch", 0) / max(1, total),
+                "delay_4_plus_share": action_counts.get("delay_4_plus_then_dispatch", 0) / max(1, total),
                 "mean_raw_reward": _mean([float(row.get("raw_reward", 0.0)) for row in values]),
                 "mean_shaped_reward": _mean([float(row.get("shaped_reward", 0.0)) for row in values]),
             }
@@ -914,21 +1009,29 @@ def _environment_acceptance_summary(
     fixed_2_service = float(fixed_2.get("service_rate_mean", 0.0))
     fixed_1_expired = float(fixed_1.get("expired_rate_mean", 0.0))
     best_score_delta = float(best.get("future_v2v_score_mean", 0.0)) - fixed_1_score
+    learned_policy_name = "adaptive_timing_ppo"
+    if not any(str(row.get("policy_name", "")) == learned_policy_name for row in interval_rows):
+        learned_policy_name = "adaptive_interval_dqn"
     interval_actions: dict[str, int] = {}
+    binary_actions: dict[str, int] = {}
+    interval_delays: list[int] = []
     for row in interval_rows:
-        if str(row.get("policy_name", "")) != "adaptive_interval_dqn":
+        if str(row.get("policy_name", "")) != learned_policy_name:
             continue
+        binary_action = str(row.get("binary_action_name", ""))
+        if binary_action:
+            binary_actions[binary_action] = binary_actions.get(binary_action, 0) + 1
         action = str(row.get("interval_action_name", ""))
-        interval_actions[action] = interval_actions.get(action, 0) + 1
+        if action:
+            interval_actions[action] = interval_actions.get(action, 0) + 1
+        if row.get("final_dispatch_executed") is True and row.get("delay_ticks", "") != "":
+            interval_delays.append(int(float(row.get("delay_ticks", 0))))
     interval_total = sum(interval_actions.values())
-    interval_delay_sum = (
-        interval_actions.get("delay_1_then_dispatch", 0)
-        + 2 * interval_actions.get("delay_2_then_dispatch", 0)
-        + 3 * interval_actions.get("delay_3_then_dispatch", 0)
-    )
-    interval_mean_delay = interval_delay_sum / max(1, interval_total) if interval_total else 0.0
+    binary_total = sum(binary_actions.values())
+    interval_mean_delay = float(sum(interval_delays) / max(1, len(interval_delays))) if interval_delays else 0.0
     interval_mean_action_interval = 1.0 + interval_mean_delay
     interval_max_action_share = max(interval_actions.values(), default=0) / max(1, interval_total) if interval_total else 0.0
+    binary_max_action_share = max(binary_actions.values(), default=0) / max(1, binary_total) if binary_total else 0.0
     interval_delayed_action_rate = (
         interval_total - interval_actions.get("dispatch_now", 0)
     ) / max(1, interval_total) if interval_total else 0.0
@@ -947,6 +1050,7 @@ def _environment_acceptance_summary(
     interval_action_ready = bool(
         interval_total
         and interval_max_action_share <= 0.75
+        and (not binary_total or binary_max_action_share <= 0.85)
         and 1.20 <= interval_mean_action_interval <= 2.20
     )
     learned_policy_total = interval_total
@@ -958,6 +1062,9 @@ def _environment_acceptance_summary(
             "best_mean_batch_interval": best_interval,
             "fixed1_expired_rate": fixed_1_expired,
             "fixed2_service_drop_vs_fixed1": fixed_1_service - fixed_2_service,
+            "learned_policy_name": learned_policy_name,
+            "learned_policy_binary_action_count": binary_total,
+            "learned_policy_binary_max_action_share": binary_max_action_share,
             "adaptive_interval_action_count": interval_total,
             "adaptive_interval_mean_action_interval": interval_mean_action_interval,
             "adaptive_interval_delayed_action_rate": interval_delayed_action_rate,

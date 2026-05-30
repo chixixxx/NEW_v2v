@@ -105,10 +105,26 @@ class TrainingConfig:
     hidden_dim: int
     double_dqn: bool
     prioritized_replay: bool
+    agent_type: str = "ppo"
     rollout_workers: int = 1
+    ppo_rollout_episodes_per_update: int = 4
+    ppo_epochs: int = 4
+    ppo_clip_ratio: float = 0.20
+    ppo_value_loss_coef: float = 0.50
+    ppo_entropy_coef: float = 0.02
+    ppo_gae_lambda: float = 0.95
+    ppo_max_grad_norm: float = 5.0
+    ppo_eval_deterministic: bool = False
+    teacher_imitation_epochs: int = 3
+    teacher_imitation_batch_size: int = 256
+    validation_action_max_share_cap: float = 0.85
+    validation_interval_max_share_cap: float = 0.75
+    validation_action_balance_penalty: float = 600.0
+    validation_min_mean_interval: float = 1.15
+    validation_max_mean_interval: float = 2.45
     reward_shaping_mode: str = "pbrs"
     pbrs_clip: float = 250.0
-    pbrs_terminal_mode: str = "zero_terminal_with_diagnostic"
+    pbrs_terminal_mode: str = "finite_horizon_correction"
     observation_profile: str = "compact_v2v"
     potential_candidate_margin_weight: float = 0.10
     potential_feasible_density_weight: float = 35.0
