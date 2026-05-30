@@ -32,7 +32,7 @@ ACTION_NAMES = {
     MATCH_FULL: "match_full",
 }
 
-OBSERVATION_NAMES = (
+LEGACY_OBSERVATION_NAMES = (
     "active_order_count",
     "total_energy_demand",
     "mean_waiting_ratio",
@@ -70,6 +70,40 @@ OBSERVATION_NAMES = (
     "projected_urgent_service_risk",
 )
 
+COMPACT_OBSERVATION_NAMES = (
+    "ticks_since_last_dispatch",
+    "time_bucket_off_peak",
+    "time_bucket_morning_peak",
+    "time_bucket_midday",
+    "time_bucket_evening_peak",
+    "active_order_count",
+    "total_energy_demand",
+    "mean_waiting_ratio",
+    "near_deadline_order_share",
+    "cancel_risk_mean",
+    "mean_willingness_to_pay",
+    "available_vehicle_count",
+    "mean_available_energy_with_health",
+    "total_available_energy",
+    "mean_time_flexibility",
+    "fleet_available_ratio",
+    "soc_safety_binding_rate",
+    "supply_demand_imbalance",
+    "top_shortage_zone_pressure",
+    "future_hotspot_pressure",
+    "mean_pickup_time_est",
+    "mean_pickup_distance_est",
+    "feasible_edge_density",
+    "mean_candidate_platform_margin",
+    "best_candidate_profit",
+    "urgent_feasible_coverage",
+    "energy_feasible_coverage",
+    "projected_service_risk",
+    "projected_urgent_service_risk",
+)
+
+OBSERVATION_NAMES = COMPACT_OBSERVATION_NAMES
+
 
 @dataclass
 class EnvironmentSnapshot:
@@ -105,10 +139,22 @@ class FutureV2VTimingEnv:
         self.scenario_id = ""
         self.scenario_day = ""
         self.scenario_start_tick_day = 0
+        self.initial_reward_potential = 0.0
 
     @property
     def observation_dim(self) -> int:
-        return len(OBSERVATION_NAMES)
+        return len(self.observation_names)
+
+    @property
+    def observation_names(self) -> tuple[str, ...]:
+        if self.env_config.observation_profile == "legacy_full":
+            return LEGACY_OBSERVATION_NAMES
+        if self.env_config.observation_profile == "compact_v2v":
+            return COMPACT_OBSERVATION_NAMES
+        raise ValueError(
+            f"unknown observation_profile={self.env_config.observation_profile!r}; "
+            "expected legacy_full or compact_v2v"
+        )
 
     def reset(self, seed: int | None = None) -> tuple[np.ndarray, dict[str, object]]:
         if seed is not None:
@@ -158,9 +204,11 @@ class FutureV2VTimingEnv:
         self.scenario_day = scenario.day
         self.scenario_start_tick_day = int(scenario.start_tick_day)
         obs = self._observation()
+        self.initial_reward_potential = self.state_potential_proxy()
         return obs, {
             "seed": self.seed,
-            "observation_names": OBSERVATION_NAMES,
+            "observation_names": self.observation_names,
+            "observation_profile": self.env_config.observation_profile,
             "scenario_id": self.scenario_id,
             "day": self.scenario_day,
             "start_tick_day": self.scenario_start_tick_day,
@@ -241,6 +289,7 @@ class FutureV2VTimingEnv:
         else:
             self._last_wait_tradeoff = None
         self._record_action_trace(tick, action, before_snapshot, result, q_values)
+        base_reward = self._base_step_reward(result)
         reward = self._step_reward(result, risk_before=risk_before)
         terminated = self.current_tick >= self.scale_config.horizon_ticks + self.scale_config.terminal_buffer_ticks
         truncated = False
@@ -249,6 +298,10 @@ class FutureV2VTimingEnv:
             "tick": self.current_tick,
             "step_result": result,
             "platform_profit": self.platform_profit,
+            "base_reward": base_reward,
+            "legacy_reward": reward,
+            "service_risk_before": float(risk_before),
+            "service_risk_after": float(self.service_risk_potential()),
         }
         return obs, reward, terminated, truncated, info
 
@@ -477,8 +530,8 @@ class FutureV2VTimingEnv:
             "max_active_vehicles": int(np.max(active_vehicles)),
         }
 
-    def _observation(self) -> np.ndarray:
-        snapshot = self.snapshot()
+    def _state_feature_values(self, snapshot: EnvironmentSnapshot | None = None) -> dict[str, float]:
+        snapshot = snapshot or self.snapshot()
         active_orders = snapshot.active_orders
         active_vehicles = snapshot.active_vehicles
         edges = snapshot.candidate_edges
@@ -491,7 +544,11 @@ class FutureV2VTimingEnv:
             for vehicle in active_vehicles
         )
         waiting_ratios = [order.waiting_ratio(self.current_tick) for order in active_orders]
-        near_deadline = sum(1 for order in active_orders if order.max_wait_ticks - order.waiting_ticks(self.current_tick) <= 1)
+        near_deadline = sum(
+            1
+            for order in active_orders
+            if order.max_wait_ticks - order.waiting_ticks(self.current_tick) <= 1
+        )
         cancel_risk = [self._cancel_probability(order) for order in active_orders]
         vehicle_flex = [vehicle.time_flexibility_ticks(self.current_tick) for vehicle in active_vehicles]
         fleet_count = sum(1 for vehicle in active_vehicles if vehicle.fleet_flag)
@@ -501,6 +558,7 @@ class FutureV2VTimingEnv:
         profits = [edge.expected_profit for edge in edges]
         margins = [edge.immediate_profit for edge in edges]
         pickups = [edge.pickup_minutes for edge in edges]
+        pickup_distances = [edge.pickup_distance_km_est for edge in edges]
         urgent_orders = [order.order_id for order in active_orders if order.is_urgent()]
         urgent_covered = {edge.order_id for edge in edges if edge.order_id in urgent_orders}
         energy_covered = {edge.order_id for edge in edges}
@@ -533,53 +591,106 @@ class FutureV2VTimingEnv:
         projected_urgent_service_rate = len(served_urgent) / max(1, len(arrived_urgent))
         service_risk = max(0.0, self.env_config.service_rate_target - projected_service_rate)
         urgent_service_risk = max(0.0, self.env_config.urgent_service_rate_target - projected_urgent_service_rate)
-        raw = np.array(
-            [
-                order_count / 100.0,
-                total_demand / 1000.0,
-                float(np.mean(waiting_ratios)) if waiting_ratios else 0.0,
-                near_deadline / 50.0,
-                float(np.mean(cancel_risk)) if cancel_risk else 0.0,
-                (float(np.mean([order.willingness_to_pay_per_kwh for order in active_orders])) / 12.0) if active_orders else 0.0,
-                vehicle_count / 100.0,
-                total_energy / 2000.0,
-                (total_energy / max(1.0, vehicle_count)) / 80.0,
-                (float(np.mean(vehicle_flex)) / 48.0) if vehicle_flex else 0.0,
-                fleet_count / max(1, vehicle_count),
-                total_demand / max(1.0, total_energy),
-                (order_count - vehicle_count) / 100.0,
-                float(np.max(shortage)) / 10.0,
-                float(np.mean(shortage)) / 5.0,
-                (float(np.mean(pickups)) / 30.0) if pickups else 0.0,
-                len(edges) / max(1, order_count * max(1, vehicle_count)),
-                (float(np.max(profits)) / 50.0) if profits else 0.0,
-                (float(np.mean(profits)) / 30.0) if profits else 0.0,
-                len(urgent_covered) / max(1, len(urgent_orders)),
-                len(energy_covered) / max(1, order_count),
-                (total_health_energy / max(1.0, vehicle_count)) / 80.0,
-                sum(
-                    1
-                    for vehicle in active_vehicles
-                    if vehicle.health_floor_kwh(self.env_config.battery_health.donor_min_soc_ratio) > vehicle.reserve_kwh
-                )
-                / max(1, vehicle_count),
-                (float(np.mean(margins)) / 30.0) if margins else 0.0,
-                (sum(edge.energy_loss_kwh for edge in edges) / max(1e-9, sum(edge.donor_output_kwh for edge in edges)))
-                if edges else 0.0,
-                ticks_since_last_dispatch / max(1, self.scale_config.horizon_ticks),
-                top_friction / 100.0,
-                full_friction / 100.0,
-                1.0 if bucket == "off_peak" else 0.0,
-                1.0 if bucket == "morning_peak" else 0.0,
-                1.0 if bucket == "midday" else 0.0,
-                1.0 if bucket == "evening_peak" else 0.0,
-                near_deadline / max(1, order_count),
-                service_risk,
-                urgent_service_risk,
-            ],
-            dtype=np.float32,
+        soc_binding_rate = (
+            sum(
+                1
+                for vehicle in active_vehicles
+                if vehicle.health_floor_kwh(self.env_config.battery_health.donor_min_soc_ratio) > vehicle.reserve_kwh
+            )
+            / max(1, vehicle_count)
         )
+        candidate_density = len(edges) / max(1, order_count * max(1, vehicle_count))
+        top_profit_edges = sorted((max(0.0, edge.expected_profit) for edge in edges), reverse=True)[
+            : max(1, estimated_full_matches)
+        ]
+        return {
+            "active_order_count_raw": float(order_count),
+            "available_vehicle_count_raw": float(vehicle_count),
+            "supply_demand_ratio_raw": float(vehicle_count / max(1, order_count)),
+            "near_deadline_order_share_raw": float(near_deadline / max(1, order_count)),
+            "feasible_edge_density_raw": float(candidate_density),
+            "mean_pickup_distance_est_raw": float(np.mean(pickup_distances)) if pickup_distances else 0.0,
+            "mean_pickup_time_est_raw": float(np.mean(pickups)) if pickups else 0.0,
+            "candidate_margin_proxy_raw": float(sum(top_profit_edges)),
+            "service_risk_potential_raw": float(self.service_risk_potential()),
+            "active_order_count": order_count / 100.0,
+            "total_energy_demand": total_demand / 1000.0,
+            "mean_waiting_ratio": float(np.mean(waiting_ratios)) if waiting_ratios else 0.0,
+            "near_deadline_order_count": near_deadline / 50.0,
+            "near_deadline_order_share": near_deadline / max(1, order_count),
+            "cancel_risk_mean": float(np.mean(cancel_risk)) if cancel_risk else 0.0,
+            "mean_willingness_to_pay": (
+                float(np.mean([order.willingness_to_pay_per_kwh for order in active_orders])) / 12.0
+                if active_orders
+                else 0.0
+            ),
+            "available_vehicle_count": vehicle_count / 100.0,
+            "total_available_energy": total_energy / 2000.0,
+            "mean_energy_surplus": (total_energy / max(1.0, vehicle_count)) / 80.0,
+            "mean_time_flexibility": (float(np.mean(vehicle_flex)) / 48.0) if vehicle_flex else 0.0,
+            "fleet_available_ratio": fleet_count / max(1, vehicle_count),
+            "resource_scarcity_index": total_demand / max(1.0, total_energy),
+            "supply_demand_imbalance": (order_count - vehicle_count) / 100.0,
+            "top_shortage_zone_pressure": float(np.max(shortage)) / 10.0,
+            "future_hotspot_pressure": float(np.mean(shortage)) / 5.0,
+            "mean_pickup_time_est": (float(np.mean(pickups)) / 30.0) if pickups else 0.0,
+            "mean_pickup_distance_est": (float(np.mean(pickup_distances)) / 20.0) if pickup_distances else 0.0,
+            "feasible_edge_density": candidate_density,
+            "best_candidate_profit": (float(np.max(profits)) / 50.0) if profits else 0.0,
+            "mean_candidate_profit": (float(np.mean(profits)) / 30.0) if profits else 0.0,
+            "urgent_feasible_coverage": len(urgent_covered) / max(1, len(urgent_orders)),
+            "energy_feasible_coverage": len(energy_covered) / max(1, order_count),
+            "mean_available_energy_with_health": (total_health_energy / max(1.0, vehicle_count)) / 80.0,
+            "soc_safety_binding_rate": soc_binding_rate,
+            "mean_candidate_platform_margin": (float(np.mean(margins)) / 30.0) if margins else 0.0,
+            "energy_loss_rate_estimate": (
+                sum(edge.energy_loss_kwh for edge in edges) / max(1e-9, sum(edge.donor_output_kwh for edge in edges))
+                if edges
+                else 0.0
+            ),
+            "ticks_since_last_dispatch": ticks_since_last_dispatch / max(1, self.scale_config.horizon_ticks),
+            "estimated_top_batch_friction": top_friction / 100.0,
+            "estimated_full_match_friction": full_friction / 100.0,
+            "time_bucket_off_peak": 1.0 if bucket == "off_peak" else 0.0,
+            "time_bucket_morning_peak": 1.0 if bucket == "morning_peak" else 0.0,
+            "time_bucket_midday": 1.0 if bucket == "midday" else 0.0,
+            "time_bucket_evening_peak": 1.0 if bucket == "evening_peak" else 0.0,
+            "projected_service_risk": service_risk,
+            "projected_urgent_service_risk": urgent_service_risk,
+        }
+
+    def _observation(self) -> np.ndarray:
+        values = self._state_feature_values()
+        raw = np.array([values[name] for name in self.observation_names], dtype=np.float32)
         return np.clip(raw, -10.0, 10.0)
+
+    def state_action_features(self, snapshot: EnvironmentSnapshot | None = None) -> dict[str, float]:
+        values = self._state_feature_values(snapshot)
+        return {
+            "active_orders": values["active_order_count_raw"],
+            "available_vehicles": values["available_vehicle_count_raw"],
+            "supply_demand_ratio": values["supply_demand_ratio_raw"],
+            "near_deadline_share": values["near_deadline_order_share_raw"],
+            "candidate_density": values["feasible_edge_density_raw"],
+            "mean_pickup_distance_est": values["mean_pickup_distance_est_raw"],
+            "mean_pickup_time_est": values["mean_pickup_time_est_raw"],
+            "projected_service_risk": values["projected_service_risk"],
+            "projected_urgent_service_risk": values["projected_urgent_service_risk"],
+        }
+
+    def state_potential_proxy(self, snapshot: EnvironmentSnapshot | None = None) -> float:
+        values = self._state_feature_values(snapshot)
+        return float(
+            values["candidate_margin_proxy_raw"]
+            + 35.0 * values["feasible_edge_density_raw"]
+            + 25.0 * values["urgent_feasible_coverage"]
+            - 1.2 * values["mean_pickup_time_est_raw"]
+            - 1.0 * values["mean_pickup_distance_est_raw"]
+            - 0.04 * values["service_risk_potential_raw"]
+            - 18.0 * values["projected_urgent_service_risk"]
+            - 30.0 * values["near_deadline_order_share_raw"]
+            - 20.0 * values["soc_safety_binding_rate"]
+        )
 
     def _advance_order_lifecycle(self, apply_cancellation: bool = True) -> tuple[int, int]:
         expired = 0
@@ -704,13 +815,25 @@ class FutureV2VTimingEnv:
             * (1.20 * service_gap + 1.50 * urgent_gap + expired_gap + 0.80 * cancelled_gap)
         )
 
-    def _step_reward(self, result: StepResult, *, risk_before: float | None = None) -> float:
+    def _base_step_reward(self, result: StepResult) -> float:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
             [order for order in self.orders if order.is_active(self.current_tick)]
         )
         batch_bonus = 0.0
         if result.dispatch_executed and result.accepted_count > 0:
             batch_bonus = min(6.0, 0.15 * result.accepted_count)
+        return (
+            result.platform_profit
+            - self.env_config.expired_penalty * result.expired_count
+            - self.env_config.cancelled_penalty * result.cancelled_count
+            - wait_penalty
+            + batch_bonus
+        )
+
+    def _step_reward(self, result: StepResult, *, risk_before: float | None = None) -> float:
+        wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
+            [order for order in self.orders if order.is_active(self.current_tick)]
+        )
         risk_after = self.service_risk_potential()
         if risk_before is None:
             risk_before = risk_after
@@ -722,15 +845,7 @@ class FutureV2VTimingEnv:
             )
         )
         wait_opportunity_bonus = self._wait_opportunity_bonus(wait_penalty) if result.dispatch_mode == "wait" else 0.0
-        return (
-            result.platform_profit
-            - self.env_config.expired_penalty * result.expired_count
-            - self.env_config.cancelled_penalty * result.cancelled_count
-            - wait_penalty
-            + service_delta_reward
-            + wait_opportunity_bonus
-            + batch_bonus
-        )
+        return self._base_step_reward(result) + service_delta_reward + wait_opportunity_bonus
 
     def _wait_opportunity_bonus(self, wait_penalty: float) -> float:
         if not self._last_wait_tradeoff:

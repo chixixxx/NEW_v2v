@@ -56,6 +56,7 @@ class EnvironmentConfig:
     enable_stochastic_acceptance: bool
     enable_stochastic_cancellation: bool
     pickup_distance_penalty_per_km: float = 0.0
+    observation_profile: str = "compact_v2v"
     service_risk_delta_weight: float = 0.12
     service_risk_delta_clip: float = 35.0
     wait_opportunity_weight: float = 0.02
@@ -111,6 +112,19 @@ class TrainingConfig:
     double_dqn: bool
     prioritized_replay: bool
     rollout_workers: int = 1
+    reward_shaping_mode: str = "pbrs"
+    pbrs_clip: float = 250.0
+    pbrs_terminal_mode: str = "zero_terminal_with_diagnostic"
+    observation_profile: str = "compact_v2v"
+    potential_candidate_margin_weight: float = 0.10
+    potential_feasible_density_weight: float = 35.0
+    potential_urgent_coverage_weight: float = 25.0
+    potential_pickup_time_weight: float = 1.2
+    potential_pickup_distance_weight: float = 1.0
+    potential_service_risk_weight: float = 0.04
+    potential_urgent_service_risk_weight: float = 18.0
+    potential_near_deadline_weight: float = 30.0
+    potential_soc_binding_weight: float = 20.0
     validation_time_buckets: list[str] = field(
         default_factory=lambda: ["morning_peak", "midday", "evening_peak", "off_peak"]
     )
@@ -140,7 +154,11 @@ def load_project_config(path: str | Path = "configs/default.json") -> ProjectCon
     with config_path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
     env_raw = dict(raw["environment"])
+    training_raw = dict(raw["training"])
     env_raw.setdefault("tick_minutes", raw["experiment"]["minutes_per_tick"])
+    observation_profile = training_raw.get("observation_profile", env_raw.get("observation_profile", "compact_v2v"))
+    env_raw["observation_profile"] = observation_profile
+    training_raw["observation_profile"] = observation_profile
     env_raw["battery_health"] = BatteryHealthConfig(**dict(env_raw.get("battery_health", {})))
     env_raw["dispatch_friction"] = DispatchFrictionConfig(**dict(env_raw.get("dispatch_friction", {})))
     if int(env_raw["tick_minutes"]) != int(raw["experiment"]["minutes_per_tick"]):
@@ -153,7 +171,7 @@ def load_project_config(path: str | Path = "configs/default.json") -> ProjectCon
         experiment=_read_dataclass(ExperimentConfig, raw["experiment"]),
         environment=_read_dataclass(EnvironmentConfig, env_raw),
         scales=scales,
-        training=_read_dataclass(TrainingConfig, raw["training"]),
+        training=_read_dataclass(TrainingConfig, training_raw),
     )
 
 

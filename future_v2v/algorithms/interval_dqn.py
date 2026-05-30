@@ -134,6 +134,11 @@ class AdaptiveIntervalDQNAgent:
                         {
                             "episode": episode,
                             "reward": float(result["episode_reward"]),
+                            "raw_reward": float(result.get("raw_reward", result["episode_reward"])),
+                            "legacy_reward": float(result.get("legacy_reward", result["episode_reward"])),
+                            "shaped_reward": float(result["episode_reward"]),
+                            "potential_delta_sum": float(result.get("potential_delta_sum", 0.0)),
+                            "reward_shaping_mode": self.config.reward_shaping_mode,
                             "loss": float(np.mean(loss_values)) if loss_values else 0.0,
                             "epsilon": epsilon,
                             "future_v2v_score": metrics.future_v2v_score,
@@ -173,6 +178,9 @@ class AdaptiveIntervalDQNAgent:
         terminated = False
         truncated = False
         episode_reward = 0.0
+        raw_reward_sum = 0.0
+        legacy_reward_sum = 0.0
+        potential_delta_sum = 0.0
         base_step_count = 0
         interval_action_counts = [0 for _ in range(INTERVAL_ACTION_COUNT)]
         loss_values: list[float] = []
@@ -180,13 +188,20 @@ class AdaptiveIntervalDQNAgent:
             epsilon = self._epsilon()
             action = self.act(obs, epsilon=epsilon)
             interval_action_counts[action] += 1
-            next_obs, reward, terminated, truncated, duration, trace_row = execute_interval_action(env, action)
+            next_obs, reward, terminated, truncated, duration, trace_row = execute_interval_action(
+                env,
+                action,
+                training_config=self.config,
+            )
             self.interval_trace.append(trace_row)
             priority = 1.0 + abs(reward) / 20.0 + (0.4 if action > 0 else 0.0)
             self.replay.add(Transition(obs, action, reward, next_obs, terminated or truncated, priority, duration))
             loss_values.extend(self._optimize_after_transition())
             obs = next_obs
             episode_reward += reward
+            raw_reward_sum += float(trace_row.get("raw_reward", reward))
+            legacy_reward_sum += float(trace_row.get("legacy_reward", reward))
+            potential_delta_sum += float(trace_row.get("pbrs_delta", 0.0))
             base_step_count += duration
         metrics = env.episode_metrics(policy_name=self.name, seed=seed)
         elapsed = max(1e-9, time.perf_counter() - started_at)
@@ -194,6 +209,11 @@ class AdaptiveIntervalDQNAgent:
         return {
             "episode": episode,
             "reward": float(episode_reward),
+            "raw_reward": float(raw_reward_sum),
+            "legacy_reward": float(legacy_reward_sum),
+            "shaped_reward": float(episode_reward),
+            "potential_delta_sum": float(potential_delta_sum),
+            "reward_shaping_mode": self.config.reward_shaping_mode,
             "loss": float(np.mean(loss_values)) if loss_values else 0.0,
             "epsilon": self._epsilon(),
             "future_v2v_score": metrics.future_v2v_score,
@@ -265,6 +285,7 @@ class AdaptiveIntervalDQNAgent:
                 env,
                 action,
                 q_values=self.last_q_values,
+                training_config=self.config,
             )
             self.interval_trace.append(trace_row)
         return self.interval_trace
@@ -277,6 +298,7 @@ class AdaptiveIntervalDQNAgent:
                 "model": self.online.state_dict(),
                 "config": self.config.__dict__,
                 "action_count": INTERVAL_ACTION_COUNT,
+                "observation_profile": self.config.observation_profile,
             },
             path,
         )
@@ -284,6 +306,12 @@ class AdaptiveIntervalDQNAgent:
     @classmethod
     def load(cls, path: Path, training_config: TrainingConfig, device: str | None = None) -> AdaptiveIntervalDQNAgent:
         payload = torch.load(path, map_location=device or "cpu")
+        payload_profile = payload.get("observation_profile")
+        if payload_profile and payload_profile != training_config.observation_profile:
+            raise ValueError(
+                "checkpoint observation_profile mismatch: "
+                f"checkpoint={payload_profile!r}, current={training_config.observation_profile!r}"
+            )
         agent = cls(obs_dim=int(payload["obs_dim"]), training_config=training_config, device=device)
         agent.online.load_state_dict(payload["model"])
         agent.target.load_state_dict(payload["model"])
@@ -302,7 +330,11 @@ class AdaptiveIntervalDQNAgent:
             truncated = False
             while not (terminated or truncated):
                 action = interval_teacher_action(env)
-                next_obs, reward, terminated, truncated, duration, _trace = execute_interval_action(env, action)
+                next_obs, reward, terminated, truncated, duration, _trace = execute_interval_action(
+                    env,
+                    action,
+                    training_config=self.config,
+                )
                 priority = 1.5 + abs(reward) / 20.0 + (0.4 if action > 0 else 0.0)
                 self.replay.add(Transition(obs, action, reward, next_obs, terminated or truncated, priority, duration))
                 obs = next_obs
@@ -456,18 +488,24 @@ def execute_interval_action(
     interval_action: int,
     *,
     q_values: list[float] | None = None,
+    training_config: TrainingConfig | None = None,
 ) -> tuple[np.ndarray, float, bool, bool, int, dict[str, object]]:
     delay = int(np.clip(interval_action, 0, INTERVAL_ACTION_COUNT - 1))
     start_tick = env.current_tick
-    start_orders = len(env.snapshot().active_orders)
-    total_reward = 0.0
+    start_snapshot = env.snapshot()
+    start_orders = len(start_snapshot.active_orders)
+    state_action_features = env.state_action_features(start_snapshot)
+    potential_start = compute_pbrs_potential(env, training_config, start_snapshot) if training_config else 0.0
+    raw_reward_sum = 0.0
+    legacy_reward_sum = 0.0
     duration = 0
     terminated = False
     truncated = False
     obs = env._observation()
     for _ in range(delay):
-        obs, reward, terminated, truncated, _info = env.step(WAIT)
-        total_reward += reward
+        obs, reward, terminated, truncated, info = env.step(WAIT)
+        raw_reward_sum += float(info.get("base_reward", reward))
+        legacy_reward_sum += float(info.get("legacy_reward", reward))
         duration += 1
         if terminated or truncated:
             break
@@ -475,11 +513,29 @@ def execute_interval_action(
     if not (terminated or truncated):
         env.set_action_q_values(q_values)
         action = MATCH_FULL if env.snapshot().active_orders else WAIT
-        obs, reward, terminated, truncated, _info = env.step(action)
-        total_reward += reward
+        obs, reward, terminated, truncated, info = env.step(action)
+        raw_reward_sum += float(info.get("base_reward", reward))
+        legacy_reward_sum += float(info.get("legacy_reward", reward))
         duration += 1
         final_dispatch_executed = action == MATCH_FULL
     end_tick = env.current_tick
+    reward_mode = training_config.reward_shaping_mode if training_config else "legacy_delta"
+    potential_end_unclipped = compute_pbrs_potential(env, training_config) if training_config else 0.0
+    terminal = terminated or truncated
+    potential_end = 0.0 if terminal else potential_end_unclipped
+    discount = (float(training_config.gamma) ** max(1, duration)) if training_config else 1.0
+    pbrs_delta = discount * potential_end - potential_start
+    if reward_mode == "none":
+        total_reward = raw_reward_sum
+    elif reward_mode == "legacy_delta":
+        total_reward = legacy_reward_sum
+    elif reward_mode == "pbrs":
+        total_reward = raw_reward_sum + pbrs_delta
+    else:
+        raise ValueError(f"unknown reward_shaping_mode={reward_mode!r}; expected none, legacy_delta, or pbrs")
+    terminal_diagnostic = ""
+    if terminal and training_config and training_config.pbrs_terminal_mode == "zero_terminal_with_diagnostic":
+        terminal_diagnostic = raw_reward_sum - potential_start + env.initial_reward_potential
     trace_row = {
         "start_tick": start_tick,
         "end_tick": end_tick,
@@ -490,11 +546,45 @@ def execute_interval_action(
         "final_dispatch_executed": final_dispatch_executed,
         "active_orders_at_start": start_orders,
         "reward": total_reward,
+        "raw_reward": raw_reward_sum,
+        "legacy_reward": legacy_reward_sum,
+        "shaped_reward": total_reward,
+        "reward_shaping_mode": reward_mode,
+        "potential_start": potential_start,
+        "potential_end": potential_end,
+        "potential_end_unclipped": potential_end_unclipped,
+        "pbrs_delta": pbrs_delta,
+        "finite_horizon_terminal_reward_diagnostic": terminal_diagnostic,
     }
+    trace_row.update(state_action_features)
     if q_values is not None:
         for idx, value in enumerate(q_values):
             trace_row[f"q_interval_{idx}"] = float(value)
     return obs, float(total_reward), terminated, truncated, max(1, duration), trace_row
+
+
+def compute_pbrs_potential(
+    env: FutureV2VTimingEnv,
+    training_config: TrainingConfig | None,
+    snapshot=None,
+) -> float:
+    if training_config is None:
+        return 0.0
+    values = env._state_feature_values(snapshot)
+    potential = (
+        training_config.potential_candidate_margin_weight * values["candidate_margin_proxy_raw"]
+        + training_config.potential_feasible_density_weight * values["feasible_edge_density_raw"]
+        + training_config.potential_urgent_coverage_weight * values["urgent_feasible_coverage"]
+        - training_config.potential_pickup_time_weight * values["mean_pickup_time_est_raw"]
+        - training_config.potential_pickup_distance_weight * values["mean_pickup_distance_est_raw"]
+        - training_config.potential_service_risk_weight * values["service_risk_potential_raw"]
+        - training_config.potential_urgent_service_risk_weight * values["projected_urgent_service_risk"]
+        - training_config.potential_near_deadline_weight * values["near_deadline_order_share_raw"]
+        - training_config.potential_soc_binding_weight * values["soc_safety_binding_rate"]
+    )
+    if training_config.pbrs_clip > 0:
+        potential = float(np.clip(potential, -training_config.pbrs_clip, training_config.pbrs_clip))
+    return float(potential)
 
 
 def interval_teacher_action(env: FutureV2VTimingEnv) -> int:
@@ -540,20 +630,33 @@ def _run_interval_rollout_task(
     terminated = False
     truncated = False
     episode_reward = 0.0
+    raw_reward_sum = 0.0
+    legacy_reward_sum = 0.0
+    potential_delta_sum = 0.0
     base_step_count = 0
     interval_action_counts = [0 for _ in range(INTERVAL_ACTION_COUNT)]
     while not (terminated or truncated):
         action = agent.act(obs, epsilon=epsilon)
         interval_action_counts[action] += 1
-        next_obs, reward, terminated, truncated, duration, _trace = execute_interval_action(env, action)
+        next_obs, reward, terminated, truncated, duration, trace = execute_interval_action(
+            env,
+            action,
+            training_config=training_config,
+        )
         priority = 1.0 + abs(reward) / 20.0 + (0.4 if action > 0 else 0.0)
         transitions.append(Transition(obs, action, reward, next_obs, terminated or truncated, priority, duration))
         obs = next_obs
         episode_reward += reward
+        raw_reward_sum += float(trace.get("raw_reward", reward))
+        legacy_reward_sum += float(trace.get("legacy_reward", reward))
+        potential_delta_sum += float(trace.get("pbrs_delta", 0.0))
         base_step_count += duration
     return {
         "transitions": transitions,
         "episode_reward": episode_reward,
+        "raw_reward": raw_reward_sum,
+        "legacy_reward": legacy_reward_sum,
+        "potential_delta_sum": potential_delta_sum,
         "metrics": env.episode_metrics(policy_name=AdaptiveIntervalDQNAgent.name, seed=seed),
         "interval_action_counts": interval_action_counts,
         "base_step_count": base_step_count,

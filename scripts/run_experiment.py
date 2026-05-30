@@ -33,7 +33,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rollout-workers", type=int, default=None, help="Parallel rollout workers for DQN training.")
     parser.add_argument("--eval-workers", type=int, default=1, help="Parallel workers for evaluation.")
     parser.add_argument("--seed", type=int, default=20260529)
+    parser.add_argument("--reward-shaping", choices=["none", "legacy_delta", "pbrs"], default=None)
+    parser.add_argument("--observation-profile", choices=["legacy_full", "compact_v2v"], default=None)
     return parser.parse_args()
+
+
+def apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> ProjectConfig:
+    training = config.training
+    environment = config.environment
+    if args.reward_shaping is not None:
+        training = replace(training, reward_shaping_mode=args.reward_shaping)
+    if args.observation_profile is not None:
+        training = replace(training, observation_profile=args.observation_profile)
+        environment = replace(environment, observation_profile=args.observation_profile)
+    elif training.observation_profile != environment.observation_profile:
+        environment = replace(environment, observation_profile=training.observation_profile)
+    return replace(config, training=training, environment=environment)
 
 
 def make_env_factory(config: ProjectConfig, scale_name: str, seed: int) -> Callable[[], FutureV2VTimingEnv]:
@@ -104,6 +119,9 @@ def run_train(
         scale_config=config.scale(scale_name),
     )
     write_csv(run_dir / "train" / "train_history.csv", history)
+    write_csv(run_dir / "train" / "reward_shaping_history.csv", _reward_shaping_history_rows(history))
+    write_csv(run_dir / "train" / "training_curve_comparison.csv", _training_curve_comparison_rows(history))
+    write_csv(run_dir / "train" / "pbrs_ablation_summary.csv", _pbrs_ablation_summary_rows(history, config.training.reward_shaping_mode))
     write_csv(run_dir / "train" / "validation_history.csv", agent.validation_history)
     if use_interval:
         write_csv(run_dir / "train" / "interval_action_distribution.csv", _interval_action_distribution_rows(history))
@@ -185,6 +203,10 @@ def run_eval(
     write_csv(run_dir / "eval" / "dispatch_trace_by_policy.csv", dispatch_rows)
     write_csv(run_dir / "eval" / "wait_tradeoff_trace.csv", wait_rows)
     write_csv(run_dir / "eval" / "interval_policy_trace.csv", interval_rows)
+    write_csv(run_dir / "eval" / "interval_action_distribution_by_policy.csv", _interval_action_distribution_by_policy(interval_rows))
+    write_csv(run_dir / "eval" / "interval_distribution_histogram.csv", _interval_distribution_histogram(interval_rows))
+    write_csv(run_dir / "eval" / "state_action_policy_trace.csv", _state_action_policy_trace(interval_rows))
+    write_csv(run_dir / "eval" / "state_action_bucket_summary.csv", _state_action_bucket_summary(interval_rows))
     write_csv(run_dir / "eval" / "timing_policy_comparison.csv", comparison_rows)
     write_csv(run_dir / "eval" / "friction_sensitivity_summary.csv", sensitivity_rows)
     write_csv(run_dir / "eval" / "environment_acceptance_summary.csv", acceptance_rows)
@@ -392,6 +414,70 @@ def _interval_action_distribution_rows(history: list[dict[str, float | int]]) ->
     ]
 
 
+def _reward_shaping_history_rows(history: list[dict[str, float | int]]) -> list[dict[str, object]]:
+    return [
+        {
+            "episode": row["episode"],
+            "reward_shaping_mode": row.get("reward_shaping_mode", ""),
+            "raw_return": row.get("raw_reward", row.get("reward", 0.0)),
+            "legacy_return": row.get("legacy_reward", row.get("reward", 0.0)),
+            "shaped_return": row.get("shaped_reward", row.get("reward", 0.0)),
+            "potential_delta_sum": row.get("potential_delta_sum", 0.0),
+            "episode_score": row.get("future_v2v_score", 0.0),
+            "service_rate": row.get("service_rate", 0.0),
+            "dispatch_now_count": row.get("interval_dispatch_now_count", 0),
+            "delay_1_count": row.get("interval_delay_1_count", 0),
+            "delay_2_count": row.get("interval_delay_2_count", 0),
+            "delay_3_count": row.get("interval_delay_3_count", 0),
+        }
+        for row in history
+    ]
+
+
+def _training_curve_comparison_rows(history: list[dict[str, float | int]]) -> list[dict[str, object]]:
+    rows = []
+    scores: list[float] = []
+    raw_returns: list[float] = []
+    shaped_returns: list[float] = []
+    for row in history:
+        scores.append(float(row.get("future_v2v_score", 0.0)))
+        raw_returns.append(float(row.get("raw_reward", row.get("reward", 0.0))))
+        shaped_returns.append(float(row.get("shaped_reward", row.get("reward", 0.0))))
+        window = min(10, len(scores))
+        rows.append(
+            {
+                "episode": row["episode"],
+                "reward_shaping_mode": row.get("reward_shaping_mode", ""),
+                "score": scores[-1],
+                "raw_return": raw_returns[-1],
+                "shaped_return": shaped_returns[-1],
+                "rolling_score_10": _mean(scores[-window:]),
+                "rolling_raw_return_10": _mean(raw_returns[-window:]),
+                "rolling_shaped_return_10": _mean(shaped_returns[-window:]),
+            }
+        )
+    return rows
+
+
+def _pbrs_ablation_summary_rows(
+    history: list[dict[str, float | int]],
+    reward_shaping_mode: str,
+) -> list[dict[str, object]]:
+    if not history:
+        return []
+    tail = history[-min(10, len(history)) :]
+    return [
+        {
+            "reward_shaping_mode": reward_shaping_mode,
+            "episodes": len(history),
+            "tail_score_mean": _mean([float(row.get("future_v2v_score", 0.0)) for row in tail]),
+            "tail_raw_return_mean": _mean([float(row.get("raw_reward", row.get("reward", 0.0))) for row in tail]),
+            "tail_shaped_return_mean": _mean([float(row.get("shaped_reward", row.get("reward", 0.0))) for row in tail]),
+            "tail_potential_delta_mean": _mean([float(row.get("potential_delta_sum", 0.0)) for row in tail]),
+        }
+    ]
+
+
 def _distance_adjusted_summary_rows(summary_rows: list[dict[str, float | str]]) -> list[dict[str, float | str]]:
     fields = [
         "policy_name",
@@ -406,6 +492,126 @@ def _distance_adjusted_summary_rows(summary_rows: list[dict[str, float | str]]) 
     rows = [{field: row.get(field, "") for field in fields} for row in summary_rows]
     rows.sort(key=lambda row: float(row.get("distance_adjusted_score_mean") or 0.0), reverse=True)
     return rows
+
+
+def _interval_action_distribution_by_policy(interval_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    counts: dict[str, dict[str, int]] = {}
+    for row in interval_rows:
+        policy = str(row.get("policy_name", ""))
+        action = str(row.get("interval_action_name", ""))
+        if not policy or not action:
+            continue
+        counts.setdefault(policy, {})[action] = counts.setdefault(policy, {}).get(action, 0) + 1
+    rows = []
+    for policy, action_counts in sorted(counts.items()):
+        total = sum(action_counts.values())
+        rows.append(
+            {
+                "policy_name": policy,
+                "total_interval_actions": total,
+                "dispatch_now_share": action_counts.get("dispatch_now", 0) / max(1, total),
+                "delay_1_share": action_counts.get("delay_1_then_dispatch", 0) / max(1, total),
+                "delay_2_share": action_counts.get("delay_2_then_dispatch", 0) / max(1, total),
+                "delay_3_share": action_counts.get("delay_3_then_dispatch", 0) / max(1, total),
+                "max_action_share": max(action_counts.values(), default=0) / max(1, total),
+            }
+        )
+    return rows
+
+
+def _interval_distribution_histogram(interval_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    counts: dict[tuple[str, int], int] = {}
+    totals: dict[str, int] = {}
+    for row in interval_rows:
+        policy = str(row.get("policy_name", ""))
+        if not policy:
+            continue
+        interval = int(float(row.get("delay_ticks", 0))) + 1
+        counts[(policy, interval)] = counts.get((policy, interval), 0) + 1
+        totals[policy] = totals.get(policy, 0) + 1
+    return [
+        {
+            "policy_name": policy,
+            "interval_ticks": interval,
+            "count": count,
+            "share": count / max(1, totals.get(policy, 0)),
+        }
+        for (policy, interval), count in sorted(counts.items())
+    ]
+
+
+def _state_action_policy_trace(interval_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    fields = [
+        "policy_name",
+        "seed",
+        "scenario_id",
+        "start_tick",
+        "interval_action_name",
+        "delay_ticks",
+        "active_orders",
+        "available_vehicles",
+        "supply_demand_ratio",
+        "near_deadline_share",
+        "candidate_density",
+        "mean_pickup_distance_est",
+        "mean_pickup_time_est",
+        "projected_service_risk",
+        "projected_urgent_service_risk",
+        "raw_reward",
+        "shaped_reward",
+        "pbrs_delta",
+    ]
+    return [{field: row.get(field, "") for field in fields} for row in interval_rows]
+
+
+def _state_action_bucket_summary(interval_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str, str, str, str, str], list[dict[str, object]]] = {}
+    for row in interval_rows:
+        key = (
+            str(row.get("policy_name", "")),
+            _bucket(float(row.get("active_orders", 0.0)), [25, 50, 100], "orders"),
+            _bucket(float(row.get("available_vehicles", 0.0)), [25, 50, 100], "vehicles"),
+            _bucket(float(row.get("supply_demand_ratio", 0.0)), [0.6, 1.0, 1.6], "sd_ratio"),
+            _bucket(float(row.get("near_deadline_share", 0.0)), [0.08, 0.18, 0.30], "deadline"),
+            _bucket(float(row.get("candidate_density", 0.0)), [0.02, 0.06, 0.12], "density"),
+        )
+        grouped.setdefault(key, []).append(row)
+    rows = []
+    for key, values in sorted(grouped.items()):
+        policy, order_bucket, vehicle_bucket, sd_bucket, deadline_bucket, density_bucket = key
+        total = len(values)
+        action_counts: dict[str, int] = {}
+        for row in values:
+            action = str(row.get("interval_action_name", ""))
+            action_counts[action] = action_counts.get(action, 0) + 1
+        rows.append(
+            {
+                "policy_name": policy,
+                "order_bucket": order_bucket,
+                "vehicle_bucket": vehicle_bucket,
+                "supply_demand_bucket": sd_bucket,
+                "near_deadline_bucket": deadline_bucket,
+                "candidate_density_bucket": density_bucket,
+                "sample_count": total,
+                "dispatch_now_share": action_counts.get("dispatch_now", 0) / max(1, total),
+                "delay_1_share": action_counts.get("delay_1_then_dispatch", 0) / max(1, total),
+                "delay_2_share": action_counts.get("delay_2_then_dispatch", 0) / max(1, total),
+                "delay_3_share": action_counts.get("delay_3_then_dispatch", 0) / max(1, total),
+                "mean_raw_reward": _mean([float(row.get("raw_reward", 0.0)) for row in values]),
+                "mean_shaped_reward": _mean([float(row.get("shaped_reward", 0.0)) for row in values]),
+            }
+        )
+    return rows
+
+
+def _bucket(value: float, cuts: list[float], prefix: str) -> str:
+    if value < cuts[0]:
+        return f"{prefix}_low"
+    if value < cuts[1]:
+        return f"{prefix}_mid"
+    if value < cuts[2]:
+        return f"{prefix}_high"
+    return f"{prefix}_very_high"
 
 
 def _paired_policy_delta_summary(
@@ -435,11 +641,14 @@ def _paired_policy_delta_summary(
                 "paired_episodes": len(scenario_ids),
                 "score_delta_mean": _mean(score_delta),
                 "score_delta_std": _std(score_delta),
+                "score_delta_sem": _sem(score_delta),
                 "score_win_rate": _win_rate(score_delta),
                 "profit_delta_mean": _mean(profit_delta),
                 "profit_delta_std": _std(profit_delta),
+                "profit_delta_sem": _sem(profit_delta),
                 "profit_win_rate": _win_rate(profit_delta),
                 "service_delta_mean": _mean(service_delta),
+                "service_delta_sem": _sem(service_delta),
                 "expired_delta_mean": _mean(expired_delta),
                 "batch_interval_delta_mean": _mean(batch_delta),
             }
@@ -627,6 +836,10 @@ def _std(values: list[float]) -> float:
         return 0.0
     mean = _mean(values)
     return float((sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5)
+
+
+def _sem(values: list[float]) -> float:
+    return float(_std(values) / max(1.0, len(values) ** 0.5))
 
 
 def _win_rate(values: list[float]) -> float:
@@ -827,7 +1040,7 @@ def _capacity_bind_rate(dispatches: list[dict[str, object]]) -> float:
 
 def main() -> None:
     args = parse_args()
-    config = load_project_config(args.config)
+    config = apply_cli_overrides(load_project_config(args.config), args)
     scale_name = "smoke" if args.stage == "smoke" else args.scale
     run_dir = resolve_run_dir(config, scale_name, args.run_name)
     run_dir.mkdir(parents=True, exist_ok=True)

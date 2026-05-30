@@ -3,7 +3,7 @@ from __future__ import annotations
 from future_v2v.config import DispatchFrictionConfig, EnvironmentConfig, ScaleConfig
 from future_v2v.algorithms.baselines import WaitOpportunityTeacherPolicy, teacher_policies
 from future_v2v.algorithms.interval_dqn import execute_interval_action
-from future_v2v.envs.timing_env import MATCH_FULL, MATCH_TOP_BATCH, OBSERVATION_NAMES, WAIT, FutureV2VTimingEnv
+from future_v2v.envs.timing_env import LEGACY_OBSERVATION_NAMES, MATCH_FULL, MATCH_TOP_BATCH, WAIT, FutureV2VTimingEnv
 from future_v2v.simulation.entities import ORDER_EXPIRED, ORDER_MATCHED, Order, Vehicle
 
 
@@ -138,6 +138,7 @@ def test_dispatch_friction_is_subtracted_from_match_profit() -> None:
     env.env_config = env.env_config.__class__(
         **{
             **env.env_config.__dict__,
+            "observation_profile": "legacy_full",
             "dispatch_friction": DispatchFrictionConfig(
                 enabled=True,
                 setup_cost=7.0,
@@ -158,6 +159,7 @@ def test_dispatch_friction_breakdown_is_applied() -> None:
     env.env_config = env.env_config.__class__(
         **{
             **env.env_config.__dict__,
+            "observation_profile": "legacy_full",
             "dispatch_friction": DispatchFrictionConfig(
                 enabled=True,
                 setup_cost=3.0,
@@ -229,6 +231,7 @@ def test_observation_exposes_dispatch_timing_and_service_risk_features() -> None
     env.env_config = env.env_config.__class__(
         **{
             **env.env_config.__dict__,
+            "observation_profile": "legacy_full",
             "dispatch_friction": DispatchFrictionConfig(
                 enabled=True,
                 setup_cost=10.0,
@@ -244,7 +247,7 @@ def test_observation_exposes_dispatch_timing_and_service_risk_features() -> None
     env.current_tick = 1
     env.dispatch_ticks = [0]
     obs = env._observation()
-    values = dict(zip(OBSERVATION_NAMES, obs))
+    values = dict(zip(LEGACY_OBSERVATION_NAMES, obs))
     assert values["ticks_since_last_dispatch"] > 0.0
     assert values["estimated_top_batch_friction"] > 0.0
     assert values["estimated_full_match_friction"] > values["estimated_top_batch_friction"]

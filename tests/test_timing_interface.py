@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from future_v2v.algorithms.baselines import QueueThresholdPolicy, default_baselines, teacher_policies
-from future_v2v.envs.timing_env import ACTION_COUNT, MATCH_FULL, MATCH_TOP_BATCH, WAIT
+from future_v2v.envs.timing_env import ACTION_COUNT, COMPACT_OBSERVATION_NAMES, MATCH_FULL, MATCH_TOP_BATCH, WAIT
 from tests.test_env_semantics import install_single_order_vehicle, make_env
 
 
@@ -23,6 +23,9 @@ def test_observation_is_fixed_low_dimensional_vector() -> None:
     assert isinstance(obs, np.ndarray)
     assert obs.dtype == np.float32
     assert obs.shape == (env.observation_dim,)
+    assert env.observation_names == COMPACT_OBSERVATION_NAMES
+    assert "estimated_full_match_friction" not in env.observation_names
+    assert "mean_pickup_distance_est" in env.observation_names
 
 
 def test_dqn_action_count_is_three() -> None:

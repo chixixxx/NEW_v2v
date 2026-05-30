@@ -48,6 +48,25 @@ python scripts/run_experiment.py --stage report --scale main
 
 默认主算法为 `adaptive_interval_dqn`，即强化学习选择匹配间隔，约束优化器统一完成匹配。旧三动作深度 Q 网络只作为诊断基线。
 
+默认训练口径：
+
+```text
+reward_shaping_mode = pbrs
+observation_profile = compact_v2v
+```
+
+普通训练可以临时覆盖奖励塑造和观测配置：
+
+```bash
+python scripts/run_experiment.py --stage all --scale main --reward-shaping pbrs --observation-profile compact_v2v --run-name main_pbrs_compact_v1
+```
+
+PBRS 对照实验会顺序运行 `none`、`legacy_delta` 和 `pbrs` 三组，并汇总训练曲线与评估摘要：
+
+```bash
+python scripts/run_pbrs_ablation.py --scale main --episodes 80 --eval-episodes 16 --rollout-workers 4 --eval-workers 4 --run-name pbrs_ablation_v1
+```
+
 ## 匹配步长诊断
 
 先看环境是否支持不同状态选择不同匹配步长：
@@ -97,6 +116,9 @@ python scripts/summarize_timing_run.py --run-name adaptive_interval_main_v1 --sc
 ```text
 outputs/<run_name>/env_health/env_health_summary.csv
 outputs/<run_name>/train/train_history.csv
+outputs/<run_name>/train/reward_shaping_history.csv
+outputs/<run_name>/train/training_curve_comparison.csv
+outputs/<run_name>/train/pbrs_ablation_summary.csv
 outputs/<run_name>/train/interval_action_distribution.csv
 outputs/<run_name>/eval/eval_summary.csv
 outputs/<run_name>/eval/distance_adjusted_eval_summary.csv
@@ -105,6 +127,10 @@ outputs/<run_name>/eval/paired_policy_delta_summary.csv
 outputs/<run_name>/eval/friction_sensitivity_summary.csv
 outputs/<run_name>/eval/environment_acceptance_summary.csv
 outputs/<run_name>/eval/interval_policy_trace.csv
+outputs/<run_name>/eval/interval_action_distribution_by_policy.csv
+outputs/<run_name>/eval/interval_distribution_histogram.csv
+outputs/<run_name>/eval/state_action_policy_trace.csv
+outputs/<run_name>/eval/state_action_bucket_summary.csv
 outputs/<run_name>/eval/dispatch_trace_by_policy.csv
 ```
 

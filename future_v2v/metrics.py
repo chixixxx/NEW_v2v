@@ -162,7 +162,9 @@ def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | s
         for field in numeric_fields:
             arr = np.array([float(item[field]) for item in materialized], dtype=float)
             row[f"{field}_mean"] = float(arr.mean())
-            row[f"{field}_std"] = float(arr.std(ddof=0))
+            std = float(arr.std(ddof=0))
+            row[f"{field}_std"] = std
+            row[f"{field}_sem"] = float(std / max(1.0, len(arr) ** 0.5))
         service_rate = float(row["service_rate_mean"])
         expired_cancelled = float(row["expired_rate_mean"]) + float(row["cancelled_rate_mean"])
         mean_batch_interval = float(row["mean_batch_interval_mean"])
