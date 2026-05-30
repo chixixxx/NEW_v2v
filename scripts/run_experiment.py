@@ -68,22 +68,28 @@ def run_generate(config: ProjectConfig, scale_name: str, run_dir: Path, seed: in
     env = make_env_factory(config, scale_name, seed)()
     scale = config.scale(scale_name)
     count = eval_episodes or scale.eval_episodes
-    manifest_rows = _build_eval_manifest(env, seed=seed, count=count)
-    write_csv(run_dir / "env_health" / "eval_scenario_manifest.csv", manifest_rows)
-    rows = []
-    for scenario in progress(manifest_rows, desc="generate env health", total=len(manifest_rows), unit="seed"):
-        if str(scenario.get("day", "")):
-            rows.append(
-                env.env_health_row_for_window(
-                    seed=int(scenario["seed"]),
-                    day=str(scenario["day"]),
-                    start_tick_day=int(scenario["start_tick_day"]),
-                    scenario_id=str(scenario["scenario_id"]),
+    manifest_rows = _load_or_build_eval_manifest(config, scale_name, run_dir, seed=seed, count=count)
+    health_path = run_dir / "env_health" / "env_health_summary.csv"
+    if health_path.exists():
+        existing_rows = _read_csv_rows(health_path)
+        rows = existing_rows[: len(manifest_rows)] if _health_rows_match_manifest(existing_rows, manifest_rows) else []
+    else:
+        rows = []
+    if not rows:
+        rows = []
+        for scenario in progress(manifest_rows, desc="generate env health", total=len(manifest_rows), unit="seed"):
+            if str(scenario.get("day", "")):
+                rows.append(
+                    env.env_health_row_for_window(
+                        seed=int(scenario["seed"]),
+                        day=str(scenario["day"]),
+                        start_tick_day=int(scenario["start_tick_day"]),
+                        scenario_id=str(scenario["scenario_id"]),
+                    )
                 )
-            )
-        else:
-            rows.append(env.env_health_row(int(scenario["seed"])))
-    write_csv(run_dir / "env_health" / "env_health_summary.csv", rows)
+            else:
+                rows.append(env.env_health_row(int(scenario["seed"])))
+        write_csv(health_path, rows)
     write_markdown_report(
         run_dir / "env_health" / "env_health_report.md",
         title=f"Future V2V Environment Health ({scale_name})",
@@ -793,6 +799,22 @@ def _build_eval_manifest(env: FutureV2VTimingEnv, *, seed: int, count: int) -> l
 def _read_csv_rows(path: Path) -> list[dict[str, object]]:
     with path.open("r", encoding="utf-8", newline="") as f:
         return [dict(row) for row in csv.DictReader(f)]
+
+
+def _health_rows_match_manifest(
+    health_rows: list[dict[str, object]],
+    manifest_rows: list[dict[str, object]],
+) -> bool:
+    if len(health_rows) < len(manifest_rows):
+        return False
+    for health, manifest in zip(health_rows, manifest_rows):
+        health_scenario = str(health.get("scenario_id", ""))
+        manifest_scenario = str(manifest.get("scenario_id", ""))
+        if health_scenario and manifest_scenario and health_scenario != manifest_scenario:
+            return False
+        if str(health.get("seed", "")) != str(manifest.get("seed", "")):
+            return False
+    return True
 
 
 def _mean(values: list[float]) -> float:

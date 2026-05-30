@@ -37,6 +37,8 @@ python scripts/run_experiment.py --stage smoke --episodes 5 --eval-episodes 3 --
 python scripts/run_experiment.py --stage all --scale main --rollout-workers 4 --eval-workers 4 --run-name adaptive_interval_main_v1
 ```
 
+主规模默认使用 80 个固定评估场景。若 `outputs/<run_name>/env_health/eval_scenario_manifest.csv` 和 `env_health_summary.csv` 已存在且数量足够，`generate` 阶段会复用它们，不再重新抽取场景或重算环境健康。
+
 分阶段运行：
 
 ```bash
