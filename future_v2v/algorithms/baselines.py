@@ -148,6 +148,42 @@ class ShortLookaheadTimingPolicy:
 
 
 @dataclass
+class HandcraftedDeadlineRulePolicy:
+    slack_threshold: int = 1
+    urgent_full_share: float = 0.18
+    high_wait_ratio: float = 0.86
+    min_profit_per_order: float = 5.0
+
+    name: str = "handcrafted_deadline_rule"
+
+    def act(self, env: FutureV2VTimingEnv, obs: np.ndarray) -> int:
+        _ = obs
+        snapshot = env.snapshot()
+        if not snapshot.active_orders:
+            return WAIT
+        waiting_ratios = [order.waiting_ratio(env.current_tick) for order in snapshot.active_orders]
+        near_deadline = [
+            order
+            for order in snapshot.active_orders
+            if order.max_wait_ticks - order.waiting_ticks(env.current_tick) <= self.slack_threshold
+        ]
+        near_deadline_share = len(near_deadline) / max(1, len(snapshot.active_orders))
+        if near_deadline_share >= self.urgent_full_share or max(waiting_ratios) >= self.high_wait_ratio:
+            return MATCH_FULL
+        recently_dispatched = bool(env.dispatch_ticks and env.current_tick - env.dispatch_ticks[-1] <= 1)
+        wait_opportunity = env.estimate_wait_opportunity(snapshot)
+        if recently_dispatched and wait_opportunity >= 0.0 and near_deadline_share < 0.08:
+            return WAIT
+        full_plan = env.matcher.solve(env.orders, env.vehicles, env.current_tick, dispatch_mode="full")
+        expected_profit = sum(match.expected_profit for match in full_plan.matches)
+        profit_per_order = expected_profit / max(1, len(snapshot.active_orders))
+        pressure = len(snapshot.active_orders) / max(1, len(snapshot.active_vehicles))
+        if profit_per_order >= self.min_profit_per_order and (pressure >= 0.50 or near_deadline_share >= 0.08):
+            return MATCH_FULL
+        return WAIT
+
+
+@dataclass
 class WaitOpportunityTeacherPolicy:
     min_wait_opportunity: float = 120.0
     low_order_share: float = 0.08
@@ -202,6 +238,14 @@ def default_baselines() -> list[TimingPolicy]:
     return [
         FixedIntervalPolicy(interval=1, match_action=MATCH_FULL),
         FixedIntervalPolicy(interval=2, match_action=MATCH_FULL),
+        FixedIntervalPolicy(interval=3, match_action=MATCH_FULL),
+        FixedIntervalPolicy(interval=4, match_action=MATCH_FULL),
+        HandcraftedDeadlineRulePolicy(),
+    ]
+
+
+def diagnostic_baselines() -> list[TimingPolicy]:
+    return [
         FixedIntervalPolicy(interval=1, match_action=MATCH_TOP_BATCH),
         QueueThresholdPolicy(),
         DeadlineTriggerPolicy(),
@@ -211,7 +255,7 @@ def default_baselines() -> list[TimingPolicy]:
 
 
 def policy_from_name(name: str) -> TimingPolicy:
-    for policy in default_baselines():
+    for policy in [*default_baselines(), *diagnostic_baselines()]:
         if policy.name == name:
             return policy
     raise KeyError(f"unknown timing baseline policy: {name}")

@@ -67,6 +67,25 @@ PBRS 对照实验会顺序运行 `none`、`legacy_delta` 和 `pbrs` 三组，并
 python scripts/run_pbrs_ablation.py --scale main --episodes 80 --eval-episodes 16 --rollout-workers 4 --eval-workers 4 --run-name pbrs_ablation_v1
 ```
 
+主评估表默认只保留 6 类策略：
+
+```text
+fixed_1_tick_full_match
+fixed_2_tick_full_match
+fixed_3_tick_full_match
+fixed_4_tick_full_match
+handcrafted_deadline_rule
+adaptive_interval_dqn
+```
+
+`fixed_1_tick_top_batch`、queue、pressure、short-lookahead 等旧策略仍保留在代码中，用于诊断和教师样本，但不再默认进入主评估表。
+
+摩擦灵敏度不再随主实验默认运行，需要单独调用：
+
+```bash
+python scripts/run_friction_sensitivity.py --scale main --run-name main_latest --eval-workers 4
+```
+
 ## 匹配步长诊断
 
 先看环境是否支持不同状态选择不同匹配步长：

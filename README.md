@@ -33,6 +33,12 @@ PBRS 对照：
 python scripts/run_pbrs_ablation.py --scale smoke --episodes 5 --eval-episodes 3 --rollout-workers 2 --eval-workers 2 --run-name smoke_pbrs_ablation_v1
 ```
 
+摩擦灵敏度单独运行，不默认混入主实验：
+
+```bash
+python scripts/run_friction_sensitivity.py --scale main --run-name main_latest --eval-workers 4
+```
+
 主实验：
 
 ```bash

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from future_v2v.algorithms.baselines import QueueThresholdPolicy, default_baselines, teacher_policies
+from future_v2v.algorithms.baselines import QueueThresholdPolicy, default_baselines, policy_from_name, teacher_policies
+from future_v2v.algorithms.interval_dqn import interval_teacher_action
 from future_v2v.envs.timing_env import ACTION_COUNT, COMPACT_OBSERVATION_NAMES, MATCH_FULL, MATCH_TOP_BATCH, WAIT
 from tests.test_env_semantics import install_single_order_vehicle, make_env
 
@@ -37,6 +38,25 @@ def test_queue_threshold_uses_scale_aware_ratio() -> None:
     install_single_order_vehicle(env)
     policy = QueueThresholdPolicy(threshold_ratio=1.0, threshold_min=4)
     assert policy.act(env, env._observation()) == WAIT
+
+
+def test_default_eval_baselines_are_concise_main_table() -> None:
+    names = [policy.name for policy in default_baselines()]
+    assert names == [
+        "fixed_1_tick_full_match",
+        "fixed_2_tick_full_match",
+        "fixed_3_tick_full_match",
+        "fixed_4_tick_full_match",
+        "handcrafted_deadline_rule",
+    ]
+    assert policy_from_name("fixed_1_tick_top_batch").name == "fixed_1_tick_top_batch"
+
+
+def test_interval_teacher_uses_immediate_match_for_deadline_rescue() -> None:
+    env = make_env()
+    install_single_order_vehicle(env, max_wait_ticks=1)
+    env.current_tick = 1
+    assert interval_teacher_action(env) == 0
 
 
 def test_tlc_wait_windows_convert_to_three_minute_ticks() -> None:

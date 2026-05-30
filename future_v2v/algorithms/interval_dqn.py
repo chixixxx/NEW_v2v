@@ -194,7 +194,7 @@ class AdaptiveIntervalDQNAgent:
                 training_config=self.config,
             )
             self.interval_trace.append(trace_row)
-            priority = 1.0 + abs(reward) / 20.0 + (0.4 if action > 0 else 0.0)
+            priority = 1.0 + abs(reward) / 20.0 + (0.25 if action == 0 else 0.15)
             self.replay.add(Transition(obs, action, reward, next_obs, terminated or truncated, priority, duration))
             loss_values.extend(self._optimize_after_transition())
             obs = next_obs
@@ -330,12 +330,13 @@ class AdaptiveIntervalDQNAgent:
             truncated = False
             while not (terminated or truncated):
                 action = interval_teacher_action(env)
+                priority_bonus = interval_teacher_priority_bonus(env, action)
                 next_obs, reward, terminated, truncated, duration, _trace = execute_interval_action(
                     env,
                     action,
                     training_config=self.config,
                 )
-                priority = 1.5 + abs(reward) / 20.0 + (0.4 if action > 0 else 0.0)
+                priority = 1.4 + abs(reward) / 20.0 + priority_bonus
                 self.replay.add(Transition(obs, action, reward, next_obs, terminated or truncated, priority, duration))
                 obs = next_obs
 
@@ -591,24 +592,51 @@ def interval_teacher_action(env: FutureV2VTimingEnv) -> int:
     snapshot = env.snapshot()
     if not snapshot.active_orders:
         return 1
+    from future_v2v.algorithms.baselines import HandcraftedDeadlineRulePolicy
+
     near_deadline_share = sum(
         1
         for order in snapshot.active_orders
         if order.max_wait_ticks - order.waiting_ticks(env.current_tick) <= 1
     ) / max(1, len(snapshot.active_orders))
+    waiting_ratios = [order.waiting_ratio(env.current_tick) for order in snapshot.active_orders]
     flex_values = [vehicle.time_flexibility_ticks(env.current_tick) for vehicle in snapshot.active_vehicles]
     mean_flex = float(np.mean(flex_values)) if flex_values else 0.0
-    if near_deadline_share >= 0.22 or mean_flex <= 3.0:
+    strong_rule_action = HandcraftedDeadlineRulePolicy().act(env, env._observation())
+    if strong_rule_action == MATCH_FULL:
+        return 0
+    if near_deadline_share >= 0.12 or (waiting_ratios and max(waiting_ratios) >= 0.82) or mean_flex <= 3.0:
         return 0
     opportunity = env.estimate_wait_opportunity(snapshot)
     pressure = len(snapshot.active_orders) / max(1, len(snapshot.active_vehicles))
-    if opportunity >= 220.0 and pressure <= 0.85:
+    edge_coverage = len({edge.order_id for edge in snapshot.candidate_edges}) / max(1, len(snapshot.active_orders))
+    if opportunity >= 260.0 and pressure <= 0.75 and near_deadline_share < 0.06:
         return 2
-    if opportunity >= 80.0 and near_deadline_share < 0.12:
+    if opportunity >= 60.0 and near_deadline_share < 0.10:
         return 1
-    if pressure <= 0.35 and near_deadline_share < 0.08:
+    if pressure <= 0.28 and edge_coverage >= 0.65 and near_deadline_share < 0.05:
         return 3
-    return 1
+    return 0 if pressure >= 0.95 else 1
+
+
+def interval_teacher_priority_bonus(env: FutureV2VTimingEnv, action: int) -> float:
+    snapshot = env.snapshot()
+    if not snapshot.active_orders:
+        return 0.0
+    near_deadline_share = sum(
+        1
+        for order in snapshot.active_orders
+        if order.max_wait_ticks - order.waiting_ticks(env.current_tick) <= 1
+    ) / max(1, len(snapshot.active_orders))
+    waiting_ratios = [order.waiting_ratio(env.current_tick) for order in snapshot.active_orders]
+    max_waiting_ratio = max(waiting_ratios) if waiting_ratios else 0.0
+    if action == 0 and (near_deadline_share >= 0.10 or max_waiting_ratio >= 0.80):
+        return 1.2
+    if action == 0:
+        return 0.45
+    if action == 1:
+        return 0.25
+    return 0.35
 
 
 def _run_interval_rollout_task(
@@ -643,7 +671,7 @@ def _run_interval_rollout_task(
             action,
             training_config=training_config,
         )
-        priority = 1.0 + abs(reward) / 20.0 + (0.4 if action > 0 else 0.0)
+        priority = 1.0 + abs(reward) / 20.0 + (0.25 if action == 0 else 0.15)
         transitions.append(Transition(obs, action, reward, next_obs, terminated or truncated, priority, duration))
         obs = next_obs
         episode_reward += reward
