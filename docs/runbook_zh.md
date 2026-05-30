@@ -159,3 +159,25 @@ WAIT 动作会根据 one-step wait tradeoff 获得轻量 opportunity bonus。若
 `teacher_prefill_episodes` 会混入同一动作空间下的 `WaitOpportunityTeacherPolicy`、`fixed_2_tick_full_match`、deadline rescue、supply-demand pressure 和 short-lookahead 样本。teacher 不直接输出匹配边，仍只输出 `WAIT / MATCH_TOP_BATCH / MATCH_FULL`。
 
 checkpoint selection 使用分层 validation：`training.validation_time_buckets` 默认覆盖 `morning_peak / midday / evening_peak / off_peak`。`train/validation_history.csv` 会输出各 bucket 的 score mean、`validation_bucket_min_score_mean`、`validation_off_peak_floor_penalty` 和 `checkpoint_selection_score`。
+## 最小验证闸门
+
+每次修改训练信号后，先用三层小成本验证，不要直接跑完整 main：
+
+```bash
+python scripts/run_experiment.py --stage smoke --episodes 5 --eval-episodes 3 --rollout-workers 2 --eval-workers 2 --run-name smoke_gate_v1
+python scripts/summarize_timing_run.py --run-name smoke_gate_v1 --scale smoke
+```
+
+```bash
+python scripts/run_experiment.py --stage all --scale main --episodes 40 --eval-episodes 8 --rollout-workers 4 --eval-workers 4 --run-name mini_main_gate_v1
+python scripts/summarize_timing_run.py --run-name mini_main_gate_v1 --scale main
+```
+
+```bash
+python scripts/run_experiment.py --stage all --scale main --episodes 80 --eval-episodes 16 --rollout-workers 4 --eval-workers 4 --run-name candidate_main_v1
+python scripts/summarize_timing_run.py --run-name candidate_main_v1 --scale main
+```
+
+`summarize_timing_run.py` 只读取已有 CSV，不重新仿真。重点看 `dqn_vs_fixed1_delta`、`dqn_gap_to_best`、`dqn_wait_rate`、`dqn_full_match_rate`、`dqn_mean_batch_interval`、`no_refresh_delta` 和 `diagnosis`。
+
+最小通过线：DQN 相比 `fixed_1_tick_full_match` 的 paired delta 为正，`WAIT rate` 在 15%-45%，`MATCH_FULL rate` 在 10%-50%，`mean_batch_interval` 在 1.15-1.70，且 off-peak 不出现明显负分。
