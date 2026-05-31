@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -9,6 +11,7 @@ from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig, lo
 from future_v2v.data.tlc_manhattan import load_tlc_manhattan_data, prepare_tlc_manhattan
 from future_v2v.envs.timing_env import FutureV2VTimingEnv
 from future_v2v.simulation.network import TLCManhattanZoneNetwork, ZoneNetwork
+from future_v2v.simulation.tlc_generator import TLCManhattanScenarioGenerator
 
 
 def make_tlc_files(tmp_path: Path) -> tuple[Path, Path]:
@@ -229,6 +232,40 @@ def test_tlc_manifest_window_replays_same_scenario(tmp_path: Path) -> None:
     assert env_a.scenario_id == "fixed_eval"
     assert [order.arrival_tick for order in env_a.orders] == [order.arrival_tick for order in env_b.orders]
     assert [vehicle.current_soc_kwh for vehicle in env_a.vehicles] == [vehicle.current_soc_kwh for vehicle in env_b.vehicles]
+
+
+def test_tlc_generator_respects_train_eval_day_phase(tmp_path: Path) -> None:
+    trip_path, lookup_path = make_tlc_files(tmp_path)
+    base = make_env_config(tmp_path, trip_path, lookup_path)
+    env_config = replace(
+        base,
+        train_days=["2025-10-01"],
+        eval_days=["2025-10-02"],
+    )
+    scale = ScaleConfig(
+        name="unit",
+        horizon_ticks=12,
+        terminal_buffer_ticks=2,
+        total_orders=12,
+        candidate_vehicles=8,
+        vehicle_join_probability=1.0,
+        fleet_probability=0.0,
+        train_episodes=1,
+        eval_episodes=1,
+    )
+    data = SimpleNamespace(days=["2025-10-01", "2025-10-02", "2025-10-03"])
+    train = TLCManhattanScenarioGenerator(env_config, scale, data, phase="train")  # type: ignore[arg-type]
+    eval_gen = TLCManhattanScenarioGenerator(env_config, scale, data, phase="eval")  # type: ignore[arg-type]
+    assert train._eligible_days() == ["2025-10-01"]
+    assert eval_gen._eligible_days() == ["2025-10-02"]
+
+    train_without_explicit_days = TLCManhattanScenarioGenerator(
+        replace(env_config, train_days=[]),
+        scale,
+        data,  # type: ignore[arg-type]
+        phase="train",
+    )
+    assert train_without_explicit_days._eligible_days() == ["2025-10-01", "2025-10-03"]
 
 
 def test_dqn_validation_manifest_uses_time_bucket_rows(tmp_path: Path) -> None:

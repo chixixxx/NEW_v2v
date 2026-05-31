@@ -83,7 +83,7 @@ def load_or_build_manifest(
         rows = read_csv_rows(path)
         if len(rows) >= count:
             return rows[:count]
-    env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed)
+    env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed, scenario_phase="eval")
     rows = build_eval_manifest(env, seed=seed, count=count)
     write_csv(path, rows)
     return rows
@@ -137,7 +137,12 @@ def short_window_oracle_rows(
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for scenario in progress(manifest, desc="short-window oracle", total=len(manifest), unit="scenario"):
-        env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=int(scenario["seed"]))
+        env = FutureV2VTimingEnv(
+            config.environment,
+            config.scale(scale_name),
+            seed=int(scenario["seed"]),
+            scenario_phase="eval",
+        )
         reset_eval_env(env, scenario)
         probe_ticks = selected_probe_ticks(env.scale_config.horizon_ticks, max_probe_states=max_probe_states)
         terminated = False
@@ -243,7 +248,12 @@ def fixed_interval_envelope_rows(
     metrics: list[EpisodeMetrics] = []
     for scenario in progress(manifest, desc="fixed interval envelope", total=len(manifest), unit="scenario"):
         for policy in policies:
-            env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=int(scenario["seed"]))
+            env = FutureV2VTimingEnv(
+                config.environment,
+                config.scale(scale_name),
+                seed=int(scenario["seed"]),
+                scenario_phase="eval",
+            )
             if str(scenario.get("day", "")):
                 reset_eval_env(env, scenario)
                 metrics.append(run_policy_on_reset_env(env, policy, seed=int(scenario["seed"])))

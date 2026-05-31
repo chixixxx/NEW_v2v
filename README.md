@@ -35,6 +35,12 @@ python scripts/run_pbrs_ablation.py --scale smoke --episodes 5 --eval-episodes 3
 python scripts/run_friction_sensitivity.py --scale main --run-name main_latest --eval-workers 4
 ```
 
+候选车辆 cap 灵敏度单独运行：
+
+```bash
+python scripts/run_cap_sensitivity.py --scale main --run-name main_latest --eval-workers 4 --caps 20,32,48,64,0
+```
+
 主实验：
 
 ```bash
@@ -58,3 +64,5 @@ python -m ruff check future_v2v scripts tests
 `scales.<scale>.total_orders` 是固定的单轮订单数，不是上界。TLC 行程用于校准时空需求、OD 结构、旅行时间和价格强度；稀疏采样窗口会按区域压力重采样，因此评估不会混入不同订单规模。
 
 `outputs/<run_name>/env_health/eval_scenario_manifest.csv` 保存固定评估窗口。主规模默认固定 80 个评估场景；存在足够数量的 manifest 和环境健康摘要时，`generate` 与 `eval` 会复用同一批场景，保证策略比较使用相同 Manhattan 需求窗口。
+
+`outputs/<run_name>/eval/eval_summary_zh.csv` 是主评估表的中文字段版本，便于直接写论文表格。

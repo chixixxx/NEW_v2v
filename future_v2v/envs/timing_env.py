@@ -112,9 +112,16 @@ class EnvironmentSnapshot:
 class FutureV2VTimingEnv:
     """A compact Gymnasium-style environment for dynamic V2V matching timing."""
 
-    def __init__(self, env_config: EnvironmentConfig, scale_config: ScaleConfig, seed: int = 0) -> None:
+    def __init__(
+        self,
+        env_config: EnvironmentConfig,
+        scale_config: ScaleConfig,
+        seed: int = 0,
+        scenario_phase: str = "train",
+    ) -> None:
         self.env_config = env_config
         self.scale_config = scale_config
+        self.scenario_phase = scenario_phase
         self.network, self.generator = self._build_network_and_generator()
         self.matcher = ConstrainedMatcher(env_config, self.network)
         self.seed = seed
@@ -208,6 +215,7 @@ class FutureV2VTimingEnv:
             "seed": self.seed,
             "observation_names": self.observation_names,
             "observation_profile": self.env_config.observation_profile,
+            "scenario_phase": self.scenario_phase,
             "scenario_id": self.scenario_id,
             "day": self.scenario_day,
             "start_tick_day": self.scenario_start_tick_day,
@@ -1022,7 +1030,12 @@ class FutureV2VTimingEnv:
             try:
                 data = load_tlc_manhattan_data(self.env_config)
                 network = TLCManhattanZoneNetwork(data=data, minutes_per_tick=self.env_config.tick_minutes)
-                generator = TLCManhattanScenarioGenerator(self.env_config, self.scale_config, data)
+                generator = TLCManhattanScenarioGenerator(
+                    self.env_config,
+                    self.scale_config,
+                    data,
+                    phase=self.scenario_phase,
+                )
                 return network, generator
             except FileNotFoundError:
                 if not (self.env_config.allow_synthetic_smoke_fallback and self.scale_config.name == "smoke"):

@@ -166,7 +166,14 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
     eval_summary = read_csv_rows(run_dir / "eval" / "eval_summary.csv")
     paired = read_csv_rows(run_dir / "eval" / "paired_policy_delta_summary.csv")
     timing = read_csv_rows(run_dir / "eval" / "timing_policy_comparison.csv")
-    sensitivity = read_csv_rows(run_dir / "eval" / "friction_sensitivity_summary.csv")
+    sensitivity_path = run_dir / "eval" / "friction_sensitivity_summary.csv"
+    eval_summary_path = run_dir / "eval" / "eval_summary.csv"
+    sensitivity_stale = (
+        sensitivity_path.exists()
+        and eval_summary_path.exists()
+        and sensitivity_path.stat().st_mtime < eval_summary_path.stat().st_mtime
+    )
+    sensitivity = [] if sensitivity_stale else read_csv_rows(sensitivity_path)
     friction_sensitivity_run = bool(sensitivity)
     interval_trace = read_csv_rows(run_dir / "eval" / "interval_policy_trace.csv")
     train_interval_actions = read_csv_rows(run_dir / "train" / "interval_action_distribution.csv")
@@ -246,6 +253,7 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
         "common_fixed_delta": common_fixed_delta,
         "no_dispatch_delta": no_dispatch_delta,
         "friction_sensitivity_run": friction_sensitivity_run,
+        "friction_sensitivity_stale": sensitivity_stale,
         "diagnosis": status,
     }
 
@@ -325,6 +333,7 @@ def print_summary(summary: dict[str, object]) -> None:
         ("common_fixed_delta", fmt_float(summary["common_fixed_delta"], 2)),
         ("no_dispatch_delta", fmt_float(summary["no_dispatch_delta"], 2)),
         ("friction_sensitivity_run", str(summary["friction_sensitivity_run"])),
+        ("friction_sensitivity_stale", str(summary["friction_sensitivity_stale"])),
         ("diagnosis", str(summary["diagnosis"])),
     ]
     width = max(len(name) for name, _ in rows)

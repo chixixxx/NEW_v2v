@@ -59,17 +59,22 @@ def apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Proj
     return replace(config, training=training, environment=environment)
 
 
-def make_env_factory(config: ProjectConfig, scale_name: str, seed: int) -> Callable[[], FutureV2VTimingEnv]:
+def make_env_factory(
+    config: ProjectConfig,
+    scale_name: str,
+    seed: int,
+    scenario_phase: str = "train",
+) -> Callable[[], FutureV2VTimingEnv]:
     scale = config.scale(scale_name)
 
     def factory() -> FutureV2VTimingEnv:
-        return FutureV2VTimingEnv(config.environment, scale, seed=seed)
+        return FutureV2VTimingEnv(config.environment, scale, seed=seed, scenario_phase=scenario_phase)
 
     return factory
 
 
 def run_generate(config: ProjectConfig, scale_name: str, run_dir: Path, seed: int, eval_episodes: int | None) -> None:
-    env = make_env_factory(config, scale_name, seed)()
+    env = make_env_factory(config, scale_name, seed, scenario_phase="eval")()
     scale = config.scale(scale_name)
     count = eval_episodes or scale.eval_episodes
     manifest_rows = _load_or_build_eval_manifest(config, scale_name, run_dir, seed=seed, count=count)
@@ -113,7 +118,7 @@ def run_train(
     episodes: int | None,
     rollout_workers: int | None,
 ) -> None:
-    env_factory = make_env_factory(config, scale_name, seed)
+    env_factory = make_env_factory(config, scale_name, seed, scenario_phase="train")
     env = env_factory()
     obs, _ = env.reset(seed=seed)
     train_episodes = episodes or config.scale(scale_name).train_episodes
@@ -230,7 +235,12 @@ def run_eval(
     write_csv(run_dir / "eval" / "timing_policy_comparison.csv", comparison_rows)
     if include_friction_sensitivity:
         write_csv(run_dir / "eval" / "friction_sensitivity_summary.csv", sensitivity_rows)
+    else:
+        stale_friction_path = run_dir / "eval" / "friction_sensitivity_summary.csv"
+        if stale_friction_path.exists():
+            stale_friction_path.unlink()
     write_csv(run_dir / "eval" / "environment_acceptance_summary.csv", acceptance_rows)
+    write_csv(run_dir / "eval" / "eval_summary_zh.csv", _eval_summary_zh_rows(summary_rows))
     write_markdown_report(
         run_dir / "eval" / "eval_report.md",
         title=f"Future V2V Timing Evaluation ({scale_name})",
@@ -300,7 +310,7 @@ def _run_eval_task(
     policy_spec: tuple[str, str],
 ) -> dict[str, object]:
     seed = int(scenario["seed"])
-    env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed)
+    env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed, scenario_phase="eval")
     kind, value = policy_spec
     if kind == "baseline":
         policy = policy_from_name(value)
@@ -540,6 +550,101 @@ def _distance_adjusted_summary_rows(summary_rows: list[dict[str, float | str]]) 
     rows = [{field: row.get(field, "") for field in fields} for row in summary_rows]
     rows.sort(key=lambda row: float(row.get("distance_adjusted_score_mean") or 0.0), reverse=True)
     return rows
+
+
+def _eval_summary_zh_rows(summary_rows: list[dict[str, float | str]]) -> list[dict[str, object]]:
+    return [
+        {
+            _translate_eval_summary_field(key): _translate_eval_summary_value(key, value)
+            for key, value in row.items()
+        }
+        for row in summary_rows
+    ]
+
+
+def _translate_eval_summary_field(field: str) -> str:
+    direct = {
+        "policy_name": "策略名称",
+        "episodes": "评估轮数",
+        "energy_loss_rate": "能量损耗率",
+        "seller_compensation_share": "卖方补偿占买方支付比例",
+        "platform_margin_per_served_order": "单服务订单平台边际收益",
+        "timing_degenerate_risk": "时机退化风险",
+        "environment_target_band": "环境目标区间达标",
+    }
+    if field in direct:
+        return direct[field]
+    suffix_map = {
+        "_mean": "_均值",
+        "_std": "_标准差",
+        "_sem": "_标准误",
+    }
+    for suffix, zh_suffix in suffix_map.items():
+        if field.endswith(suffix):
+            return f"{_translate_eval_metric_base(field[: -len(suffix)])}{zh_suffix}"
+    return field
+
+
+def _translate_eval_metric_base(field: str) -> str:
+    mapping = {
+        "future_v2v_score": "未来V2V得分",
+        "platform_profit": "平台利润",
+        "service_rate": "服务率",
+        "urgent_service_rate": "急单服务率",
+        "expired_rate": "过期率",
+        "cancelled_rate": "取消率",
+        "mean_wait_before_match": "匹配前平均等待步数",
+        "mean_batch_interval": "平均匹配间隔",
+        "mean_pickup_time": "平均接驾时间",
+        "total_pickup_distance_km": "总接驾距离_公里",
+        "mean_pickup_distance_km": "平均接驾距离_公里",
+        "pickup_distance_per_served_order": "单服务订单接驾距离_公里",
+        "distance_adjusted_score": "距离修正得分",
+        "mean_commitment_ticks": "平均服务占用步数",
+        "profit_per_served_order": "单服务订单利润",
+        "fleet_utilization": "车队车辆利用率",
+        "private_utilization": "私人车辆利用率",
+        "energy_utilization": "可供电量利用率",
+        "dispatch_epoch_count": "派单次数",
+        "unmet_kwh": "未满足电量_kWh",
+        "delivered_kwh": "实际交付电量_kWh",
+        "donor_output_kwh": "供电车输出电量_kWh",
+        "energy_loss_kwh": "传输损耗电量_kWh",
+        "buyer_payment": "买方支付",
+        "seller_reimbursement": "卖方补偿",
+        "seller_energy_cost": "卖方电能成本",
+        "seller_degradation_cost": "电池退化成本",
+        "seller_service_premium": "卖方服务溢价",
+        "platform_margin": "平台边际收益",
+        "dispatch_friction_cost": "派单交易摩擦成本",
+        "dispatch_setup_cost": "派单启动成本",
+        "dispatch_pair_coordination_cost": "配对协调成本",
+        "dispatch_refresh_cost": "报价刷新成本",
+        "dispatch_full_mode_extra_cost": "完整匹配额外协调成本",
+        "friction_share_of_gross_profit": "摩擦成本占毛收益比例",
+        "mean_donor_soc_after": "供电后平均SOC",
+        "min_donor_soc_after": "供电后最低SOC",
+        "donor_soc_violation_count": "SOC违规数",
+        "battery_health_rejection_count": "电池健康约束拒绝数",
+    }
+    return mapping.get(field, field)
+
+
+def _translate_eval_summary_value(field: str, value: object) -> object:
+    if field == "policy_name":
+        names = {
+            "fixed_1_tick_full_match": "固定1步完整匹配",
+            "fixed_2_tick_full_match": "固定2步完整匹配",
+            "fixed_3_tick_full_match": "固定3步完整匹配",
+            "fixed_4_tick_full_match": "固定4步完整匹配",
+            "handcrafted_deadline_rule": "手写临期强规则",
+            "adaptive_timing_ppo": "自适应时机PPO",
+            "adaptive_interval_dqn": "自适应间隔DQN",
+        }
+        return names.get(str(value), value)
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return value
 
 
 def _interval_action_distribution_by_policy(interval_rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -861,7 +966,7 @@ def _load_or_build_eval_manifest(
         rows = _read_csv_rows(path)
         if len(rows) >= count:
             return rows[:count]
-    env = make_env_factory(config, scale_name, seed)()
+    env = make_env_factory(config, scale_name, seed, scenario_phase="eval")()
     rows = _build_eval_manifest(env, seed=seed, count=count)
     write_csv(path, rows)
     return rows

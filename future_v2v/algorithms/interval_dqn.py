@@ -361,7 +361,12 @@ class AdaptiveIntervalDQNAgent:
         bucket_scores: dict[str, list[float]] = {}
         scenarios = self._validation_manifest(env_config, scale_config, seed_start)
         for idx, scenario in enumerate(scenarios):
-            env = FutureV2VTimingEnv(env_config, scale_config, seed=seed_start + 50_000 + idx)
+            env = FutureV2VTimingEnv(
+                env_config,
+                scale_config,
+                seed=seed_start + 50_000 + idx,
+                scenario_phase="validation",
+            )
             if scenario.get("day") and scenario.get("start_tick_day") != "":
                 obs, _ = env.reset_to_tlc_window(
                     seed=int(scenario["seed"]),
@@ -428,7 +433,12 @@ class AdaptiveIntervalDQNAgent:
     ) -> list[dict[str, object]]:
         if self._validation_scenarios is not None:
             return self._validation_scenarios
-        env = FutureV2VTimingEnv(env_config, scale_config, seed=seed_start + 50_000)
+        env = FutureV2VTimingEnv(
+            env_config,
+            scale_config,
+            seed=seed_start + 50_000,
+            scenario_phase="validation",
+        )
         generator = getattr(env, "generator", None)
         buckets = list(self.config.validation_time_buckets) or ["unknown"]
         total = max(1, int(self.config.validation_episodes))
@@ -630,7 +640,7 @@ def _run_interval_rollout_task(
     random.seed(seed)
     np.random.seed(seed % (2**32 - 1))
     torch.manual_seed(seed)
-    env = FutureV2VTimingEnv(env_config, scale_config, seed=seed)
+    env = FutureV2VTimingEnv(env_config, scale_config, seed=seed, scenario_phase="train")
     obs, _ = env.reset(seed=seed)
     agent = AdaptiveIntervalDQNAgent(obs_dim=len(obs), training_config=training_config, device="cpu")
     agent.online.load_state_dict(state_dict)

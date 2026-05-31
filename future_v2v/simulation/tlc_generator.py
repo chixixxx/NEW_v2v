@@ -12,10 +12,17 @@ from future_v2v.simulation.generator import Scenario
 class TLCManhattanScenarioGenerator:
     WINDOW_SEARCH_ATTEMPTS = 96
 
-    def __init__(self, env_config: EnvironmentConfig, scale_config: ScaleConfig, data: TLCManhattanData) -> None:
+    def __init__(
+        self,
+        env_config: EnvironmentConfig,
+        scale_config: ScaleConfig,
+        data: TLCManhattanData,
+        phase: str = "train",
+    ) -> None:
         self.env_config = env_config
         self.scale_config = scale_config
         self.data = data
+        self.phase = phase
 
     def generate(self, seed: int) -> Scenario:
         rng = np.random.default_rng(seed)
@@ -152,14 +159,38 @@ class TLCManhattanScenarioGenerator:
         return "off_peak"
 
     def _eligible_days(self) -> list[str]:
-        configured = self.env_config.train_days or self.env_config.eval_days or []
-        configured = [str(day) for day in configured]
+        configured = [str(day) for day in self._configured_days_for_phase()]
         if configured:
             available = set(self.data.days)
             matched = [day for day in configured if day in available]
             if matched:
                 return matched
+            raise ValueError(
+                f"No TLC days match configured {self.phase}_days={configured}; "
+                f"available days include {self.data.days[:5]}"
+            )
+        excluded = set(self._excluded_days_for_phase())
+        if excluded:
+            remaining = [day for day in self.data.days if day not in excluded]
+            if remaining:
+                return remaining
         return self.data.days
+
+    def _configured_days_for_phase(self) -> list[str]:
+        if self.phase == "train":
+            return list(self.env_config.train_days or [])
+        if self.phase in {"eval", "manifest"}:
+            return list(self.env_config.eval_days or [])
+        if self.phase == "validation":
+            return list(self.env_config.eval_days or self.env_config.train_days or [])
+        raise ValueError(f"unknown TLC scenario phase={self.phase!r}; expected train, validation, eval, or manifest")
+
+    def _excluded_days_for_phase(self) -> list[str]:
+        if self.phase == "train" and self.env_config.eval_days:
+            return [str(day) for day in self.env_config.eval_days]
+        if self.phase in {"eval", "manifest"} and self.env_config.train_days:
+            return [str(day) for day in self.env_config.train_days]
+        return []
 
     def _sample_order_rows(self, rows: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
         if rows.empty:

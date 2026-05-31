@@ -59,6 +59,12 @@ python scripts/run_pbrs_ablation.py --scale main --episodes 80 --eval-episodes 1
 python scripts/run_friction_sensitivity.py --scale main --run-name main_latest --eval-workers 4
 ```
 
+候选车辆 cap 灵敏度也单独调用。`0` 表示不限制每个订单预筛车辆数：
+
+```bash
+python scripts/run_cap_sensitivity.py --scale main --run-name main_latest --eval-workers 4 --caps 20,32,48,64,0
+```
+
 主评估表默认保留 6 类策略：
 
 ```text
@@ -124,6 +130,7 @@ outputs/<run_name>/train/pbrs_ablation_summary.csv
 outputs/<run_name>/train/interval_action_distribution.csv
 outputs/<run_name>/train/validation_history.csv
 outputs/<run_name>/eval/eval_summary.csv
+outputs/<run_name>/eval/eval_summary_zh.csv
 outputs/<run_name>/eval/distance_adjusted_eval_summary.csv
 outputs/<run_name>/eval/timing_policy_comparison.csv
 outputs/<run_name>/eval/paired_policy_delta_summary.csv
@@ -144,3 +151,5 @@ python -m pytest tests -q
 ```
 
 最小验收建议：先跑 smoke，再跑 main 小样本。如果 PPO 的二元动作或动态间隔再次塌缩，再优先检查教师样本、熵系数、PBRS 势函数和 checkpoint 动作分布约束，不先改环境惩罚。
+
+如果同时配置 `train_days` 和 `eval_days`，训练环境只从 `train_days` 采样，主评估和 manifest 只从 `eval_days` 采样；不要再依赖生成器内部的隐式 fallback。

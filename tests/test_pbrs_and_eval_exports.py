@@ -177,6 +177,22 @@ def test_ppo_checkpoint_selection_penalizes_action_collapse() -> None:
     assert score < 97.0
 
 
+def test_ppo_gae_uses_reward_scale_for_value_targets() -> None:
+    training = make_training_config(agent_type="ppo", ppo_reward_scale=1000.0)
+    agent = AdaptiveTimingPPOAgent(obs_dim=3, training_config=training, device="cpu")
+    advantages, returns = agent._gae_for_episode(
+        [
+            {
+                "reward": 1000.0,
+                "value": 0.0,
+                "done": True,
+            }
+        ]
+    )
+    assert advantages == [1.0]
+    assert returns == [1.0]
+
+
 def test_checkpoint_rejects_observation_profile_mismatch(tmp_path: Path) -> None:
     compact = make_training_config(observation_profile="compact_v2v")
     legacy = replace(compact, observation_profile="legacy_full")

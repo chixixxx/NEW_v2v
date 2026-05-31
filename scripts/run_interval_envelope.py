@@ -94,7 +94,12 @@ def _run_envelope_policy_task(
     scenario: dict[str, object],
     policy,
 ) -> tuple[EpisodeMetrics, dict[str, object]]:
-    env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=int(scenario["seed"]))
+    env = FutureV2VTimingEnv(
+        config.environment,
+        config.scale(scale_name),
+        seed=int(scenario["seed"]),
+        scenario_phase="eval",
+    )
     reset_eval_env(env, scenario)
     obs = env._observation()
     terminated = False
@@ -123,7 +128,7 @@ def load_or_build_manifest(
         rows = read_csv_rows(path)
         if len(rows) >= count:
             return rows[:count]
-    env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed)
+    env = FutureV2VTimingEnv(config.environment, config.scale(scale_name), seed=seed, scenario_phase="eval")
     generator = getattr(env, "generator", None)
     rows = []
     if hasattr(generator, "manifest_row"):

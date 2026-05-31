@@ -145,6 +145,8 @@ class AdaptiveTimingPPOAgent:
                         "policy_loss": float(update_stats["policy_loss"]),
                         "value_loss": float(update_stats["value_loss"]),
                         "entropy": float(update_stats["entropy"]),
+                        "ppo_reward_scale": float(self.config.ppo_reward_scale),
+                        "ppo_value_clip_range": float(self.config.ppo_value_clip_range),
                         "future_v2v_score": metrics.future_v2v_score,
                         "platform_profit": metrics.platform_profit,
                         "service_rate": metrics.service_rate,
@@ -188,7 +190,12 @@ class AdaptiveTimingPPOAgent:
         if worker_count <= 1 or len(batch_ids) <= 1:
             rows = []
             for episode in batch_ids:
-                env = FutureV2VTimingEnv(env_config, scale_config, seed=seed_start + 1000 + episode)
+                env = FutureV2VTimingEnv(
+                    env_config,
+                    scale_config,
+                    seed=seed_start + 1000 + episode,
+                    scenario_phase="train",
+                )
                 rows.append(
                     self._collect_episode(
                         env,
@@ -370,6 +377,7 @@ class AdaptiveTimingPPOAgent:
         )
         returns_tensor = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
         advantages_tensor = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
+        old_values = torch.as_tensor([step["value"] for step in flat_steps], dtype=torch.float32, device=self.device)
         if advantages_tensor.numel() > 1:
             advantages_tensor = (advantages_tensor - advantages_tensor.mean()) / (advantages_tensor.std() + 1e-8)
         batch_size = max(1, min(int(self.config.batch_size), len(flat_steps)))
@@ -393,7 +401,19 @@ class AdaptiveTimingPPOAgent:
                     1.0 + float(self.config.ppo_clip_ratio),
                 )
                 policy_loss = -torch.min(ratio * batch_adv, clipped_ratio * batch_adv).mean()
-                value_loss = torch.nn.functional.mse_loss(values, returns_tensor.index_select(0, idx))
+                target_values = returns_tensor.index_select(0, idx)
+                if self.config.ppo_value_clip_range > 0:
+                    old_batch_values = old_values.index_select(0, idx)
+                    clipped_values = old_batch_values + torch.clamp(
+                        values - old_batch_values,
+                        -float(self.config.ppo_value_clip_range),
+                        float(self.config.ppo_value_clip_range),
+                    )
+                    unclipped_loss = (values - target_values).pow(2)
+                    clipped_loss = (clipped_values - target_values).pow(2)
+                    value_loss = 0.5 * torch.max(unclipped_loss, clipped_loss).mean()
+                else:
+                    value_loss = torch.nn.functional.mse_loss(values, target_values)
                 entropy = dist.entropy().mean()
                 loss = (
                     policy_loss
@@ -419,8 +439,9 @@ class AdaptiveTimingPPOAgent:
         advantages = [0.0 for _ in steps]
         returns = [0.0 for _ in steps]
         gae = 0.0
+        reward_scale = max(1e-6, float(self.config.ppo_reward_scale))
         for idx in reversed(range(len(steps))):
-            reward = float(steps[idx]["reward"])
+            reward = float(steps[idx]["reward"]) / reward_scale
             value = float(steps[idx]["value"])
             done = bool(steps[idx]["done"])
             next_value = 0.0 if idx == len(steps) - 1 else float(steps[idx + 1]["value"])
@@ -537,7 +558,12 @@ class AdaptiveTimingPPOAgent:
         trace_rows: list[dict[str, object]] = []
         scenarios = self._validation_manifest(env_config, scale_config, seed_start)
         for idx, scenario in enumerate(scenarios):
-            env = FutureV2VTimingEnv(env_config, scale_config, seed=seed_start + 50_000 + idx)
+            env = FutureV2VTimingEnv(
+                env_config,
+                scale_config,
+                seed=seed_start + 50_000 + idx,
+                scenario_phase="validation",
+            )
             if scenario.get("day") and scenario.get("start_tick_day") != "":
                 obs, _ = env.reset_to_tlc_window(
                     seed=int(scenario["seed"]),
@@ -631,7 +657,12 @@ class AdaptiveTimingPPOAgent:
     ) -> list[dict[str, object]]:
         if self._validation_scenarios is not None:
             return self._validation_scenarios
-        env = FutureV2VTimingEnv(env_config, scale_config, seed=seed_start + 50_000)
+        env = FutureV2VTimingEnv(
+            env_config,
+            scale_config,
+            seed=seed_start + 50_000,
+            scenario_phase="validation",
+        )
         generator = getattr(env, "generator", None)
         buckets = list(self.config.validation_time_buckets) or ["unknown"]
         total = max(1, int(self.config.validation_episodes))
@@ -779,7 +810,7 @@ def _run_ppo_rollout_task(
     random.seed(seed)
     np.random.seed(seed % (2**32 - 1))
     torch.manual_seed(seed)
-    env = FutureV2VTimingEnv(env_config, scale_config, seed=seed)
+    env = FutureV2VTimingEnv(env_config, scale_config, seed=seed, scenario_phase="train")
     agent = AdaptiveTimingPPOAgent(obs_dim=obs_dim, training_config=training_config, device="cpu")
     agent.model.load_state_dict(state_dict)
     return agent._collect_episode(env, seed=seed, episode=episode, deterministic=False)

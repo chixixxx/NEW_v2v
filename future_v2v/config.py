@@ -115,6 +115,8 @@ class TrainingConfig:
     ppo_gae_lambda: float = 0.95
     ppo_max_grad_norm: float = 5.0
     ppo_eval_deterministic: bool = False
+    ppo_reward_scale: float = 1000.0
+    ppo_value_clip_range: float = 0.20
     teacher_imitation_epochs: int = 3
     teacher_imitation_batch_size: int = 256
     validation_action_max_share_cap: float = 0.85
