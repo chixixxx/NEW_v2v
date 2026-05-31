@@ -97,6 +97,7 @@ def constrained_profit_score(
     mean_commitment_ticks: float,
     profit_scale: float,
     env_config: EnvironmentConfig,
+    total_pickup_distance_km: float = 0.0,
 ) -> float:
     service_penalty = 1.20 * max(0.0, env_config.service_rate_target - service_rate)
     urgent_penalty = 1.50 * max(0.0, env_config.urgent_service_rate_target - urgent_service_rate)
@@ -106,8 +107,24 @@ def constrained_profit_score(
     commitment_penalty = (
         0.04 * served_orders * profit_scale * max(0.0, mean_commitment_ticks - env_config.mean_commitment_soft_cap_ticks)
     )
+    distance_penalty = env_config.pickup_distance_penalty_per_km * total_pickup_distance_km
     rate_penalty = profit_scale * total_orders * (service_penalty + urgent_penalty + expired_penalty + cancelled_penalty)
-    return platform_profit - rate_penalty - pickup_penalty - commitment_penalty
+    return platform_profit - rate_penalty - pickup_penalty - commitment_penalty - distance_penalty
+
+
+def environment_target_band_ready(
+    *,
+    service_rate: float,
+    expired_rate: float,
+    cancelled_rate: float,
+    donor_soc_violation_count: float = 0.0,
+) -> bool:
+    expired_cancelled = expired_rate + cancelled_rate
+    return bool(
+        0.65 <= service_rate <= 0.82
+        and 0.18 <= expired_cancelled <= 0.30
+        and donor_soc_violation_count <= 0.0
+    )
 
 
 def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | str]]:
@@ -166,7 +183,6 @@ def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | s
             row[f"{field}_std"] = std
             row[f"{field}_sem"] = float(std / max(1.0, len(arr) ** 0.5))
         service_rate = float(row["service_rate_mean"])
-        expired_cancelled = float(row["expired_rate_mean"]) + float(row["cancelled_rate_mean"])
         mean_batch_interval = float(row["mean_batch_interval_mean"])
         energy_loss_rate = float(row["energy_loss_kwh_mean"]) / max(1e-9, float(row["donor_output_kwh_mean"]))
         seller_comp_share = float(row["seller_reimbursement_mean"]) / max(1e-9, float(row["buyer_payment_mean"]))
@@ -177,19 +193,24 @@ def summarize_metrics(metrics: list[EpisodeMetrics]) -> list[dict[str, float | s
             float(np.mean([value.served_orders for value in values])),
         )
         row["timing_degenerate_risk"] = bool(mean_batch_interval <= 1.15)
-        row["environment_target_band"] = bool(0.65 <= service_rate <= 0.82 and 0.08 <= expired_cancelled <= 0.22)
+        row["environment_target_band"] = environment_target_band_ready(
+            service_rate=service_rate,
+            expired_rate=float(row["expired_rate_mean"]),
+            cancelled_rate=float(row["cancelled_rate_mean"]),
+            donor_soc_violation_count=float(row["donor_soc_violation_count_mean"]),
+        )
         rows.append(row)
     rows.sort(key=lambda row: float(row["future_v2v_score_mean"]), reverse=True)
     return rows
 
 
-def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+def write_csv(path: Path, rows: list[dict[str, object]], *, encoding: str = "utf-8") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
-        path.write_text("", encoding="utf-8")
+        path.write_text("", encoding=encoding)
         return
     fieldnames = list(rows[0].keys())
-    with path.open("w", encoding="utf-8", newline="") as f:
+    with path.open("w", encoding=encoding, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)

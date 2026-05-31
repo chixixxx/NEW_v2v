@@ -86,7 +86,12 @@ def _cap_summary_rows(
     paired_by_policy = {str(row["policy_name"]): row for row in paired_rows}
     fixed1_score = float(summary_by_policy.get("fixed_1_tick_full_match", {}).get("future_v2v_score_mean", 0.0))
     fixed2_score = float(summary_by_policy.get("fixed_2_tick_full_match", {}).get("future_v2v_score_mean", 0.0))
-    handcrafted_score = float(summary_by_policy.get("handcrafted_deadline_rule", {}).get("future_v2v_score_mean", 0.0))
+    handcrafted_observable_score = float(
+        summary_by_policy.get("handcrafted_observable_rule", {}).get("future_v2v_score_mean", 0.0)
+    )
+    handcrafted_lookahead_score = float(
+        summary_by_policy.get("handcrafted_lookahead_rule", {}).get("future_v2v_score_mean", 0.0)
+    )
     best = max(summary_rows, key=lambda row: float(row["future_v2v_score_mean"]), default={})
     rows = []
     for row in summary_rows:
@@ -108,7 +113,8 @@ def _cap_summary_rows(
                 "total_pickup_distance_km_mean": row.get("total_pickup_distance_km_mean", 0.0),
                 "score_delta_vs_fixed1_mean": score - fixed1_score,
                 "score_delta_vs_fixed2_mean": score - fixed2_score,
-                "score_delta_vs_handcrafted_mean": score - handcrafted_score,
+                "score_delta_vs_handcrafted_observable_mean": score - handcrafted_observable_score,
+                "score_delta_vs_handcrafted_lookahead_mean": score - handcrafted_lookahead_score,
                 "paired_delta_vs_fixed1_mean": paired.get("score_delta_mean", ""),
                 "paired_delta_vs_fixed1_sem": paired.get("score_delta_sem", ""),
                 "paired_win_rate_vs_fixed1": paired.get("score_win_rate", ""),

@@ -73,11 +73,12 @@ fixed_1_tick_full_match
 fixed_2_tick_full_match
 fixed_3_tick_full_match
 fixed_4_tick_full_match
-handcrafted_deadline_rule
+handcrafted_observable_rule
+handcrafted_lookahead_rule
 adaptive_timing_ppo
 ```
 
-固定 1/2/3/4 步用于比较不同固定匹配间隔。手写临期规则是强启发式。PPO 是主方法。旧三动作和其它规则策略不再作为默认主实验内容。
+固定 1/2/3/4 步用于比较不同固定匹配间隔。手写公平可观测规则只看当前状态；手写前视强规则额外看下一步订单，主要作为强诊断参照。PPO 是主方法。旧三动作和其它规则策略不再作为默认主实验内容。
 
 ## 独立诊断脚本
 
@@ -163,7 +164,7 @@ outputs/<run_name>/env_diagnostics/interval_diversity_summary.csv
 outputs/<run_name>/env_diagnostics/pickup_distance_summary.csv
 ```
 
-`eval_summary_zh.csv` 是主评估表的中文字段版本，便于论文表格阅读。正式分析仍建议保留原始 `eval_summary.csv`，方便脚本继续处理。
+`eval_summary_zh.csv` 是主评估表的中文字段版本，使用带 BOM 的 UTF-8 编码，便于 Excel 直接打开。正式分析仍建议保留原始 `eval_summary.csv`，方便脚本继续处理。
 
 ## 结果不好时先看什么
 

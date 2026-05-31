@@ -294,7 +294,7 @@ class FutureV2VTimingEnv:
         else:
             self._last_wait_tradeoff = None
         self._record_action_trace(tick, action, before_snapshot, result, q_values)
-        base_reward = self._base_step_reward(result)
+        base_reward = self._base_step_reward(result, risk_before=risk_before)
         reward = self._step_reward(result, risk_before=risk_before)
         terminated = self.current_tick >= self.scale_config.horizon_ticks + self.scale_config.terminal_buffer_ticks
         truncated = False
@@ -400,8 +400,9 @@ class FutureV2VTimingEnv:
             mean_commitment_ticks=mean_commitment,
             profit_scale=profit_scale,
             env_config=self.env_config,
+            total_pickup_distance_km=total_pickup_distance,
         )
-        distance_adjusted_score = score - self.env_config.pickup_distance_penalty_per_km * total_pickup_distance
+        distance_adjusted_score = score
         return EpisodeMetrics(
             policy_name=policy_name,
             seed=seed,
@@ -812,18 +813,45 @@ class FutureV2VTimingEnv:
             * (1.20 * service_gap + 1.50 * urgent_gap + expired_gap + 0.80 * cancelled_gap)
         )
 
-    def _base_step_reward(self, result: StepResult) -> float:
+    def _base_step_reward(self, result: StepResult, *, risk_before: float | None = None) -> float:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
             [order for order in self.orders if order.is_active(self.current_tick)]
         )
         batch_bonus = 0.0
         if result.dispatch_executed and result.accepted_count > 0:
             batch_bonus = min(6.0, 0.15 * result.accepted_count)
+        pickup_soft_penalty = (
+            0.03
+            * result.accepted_count
+            * self._profit_scale()
+            * max(0.0, result.mean_pickup_minutes - self.env_config.mean_pickup_soft_cap_min)
+        )
+        commitment_soft_penalty = (
+            0.04
+            * result.accepted_count
+            * self._profit_scale()
+            * max(0.0, result.mean_commitment_ticks - self.env_config.mean_commitment_soft_cap_ticks)
+        )
+        distance_penalty = self.env_config.pickup_distance_penalty_per_km * result.total_pickup_distance_km
+        risk_delta_reward = 0.0
+        if risk_before is not None:
+            risk_after = self.service_risk_potential()
+            risk_delta_reward = self.env_config.service_risk_delta_weight * float(
+                np.clip(
+                    risk_before - risk_after,
+                    -self.env_config.service_risk_delta_clip,
+                    self.env_config.service_risk_delta_clip,
+                )
+            )
         return (
             result.platform_profit
             - self.env_config.expired_penalty * result.expired_count
             - self.env_config.cancelled_penalty * result.cancelled_count
             - wait_penalty
+            - pickup_soft_penalty
+            - commitment_soft_penalty
+            - distance_penalty
+            + risk_delta_reward
             + batch_bonus
         )
 
@@ -831,18 +859,8 @@ class FutureV2VTimingEnv:
         wait_penalty = self.env_config.wait_penalty_per_order_tick * len(
             [order for order in self.orders if order.is_active(self.current_tick)]
         )
-        risk_after = self.service_risk_potential()
-        if risk_before is None:
-            risk_before = risk_after
-        service_delta_reward = self.env_config.service_risk_delta_weight * float(
-            np.clip(
-                risk_before - risk_after,
-                -self.env_config.service_risk_delta_clip,
-                self.env_config.service_risk_delta_clip,
-            )
-        )
         wait_opportunity_bonus = self._wait_opportunity_bonus(wait_penalty) if result.dispatch_mode == "wait" else 0.0
-        return self._base_step_reward(result) + service_delta_reward + wait_opportunity_bonus
+        return self._base_step_reward(result, risk_before=risk_before) + wait_opportunity_bonus
 
     def _wait_opportunity_bonus(self, wait_penalty: float) -> float:
         if not self._last_wait_tradeoff:
@@ -859,9 +877,18 @@ class FutureV2VTimingEnv:
         bounded = float(np.clip(max(0.0, wait_opportunity), 0.0, self.env_config.wait_opportunity_cap))
         return self.env_config.wait_opportunity_weight * bounded
 
-    def estimate_wait_opportunity(self, snapshot: EnvironmentSnapshot | None = None) -> float:
+    def estimate_wait_opportunity(
+        self,
+        snapshot: EnvironmentSnapshot | None = None,
+        *,
+        include_future_orders: bool = False,
+    ) -> float:
         snapshot = snapshot or self.snapshot()
-        future_orders = [order for order in self.orders if order.arrival_tick == self.current_tick + 1]
+        future_orders = (
+            [order for order in self.orders if order.arrival_tick == self.current_tick + 1]
+            if include_future_orders
+            else []
+        )
         current_profit = sum(edge.expected_profit for edge in snapshot.candidate_edges)
         future_profit_proxy = 0.0
         if future_orders:

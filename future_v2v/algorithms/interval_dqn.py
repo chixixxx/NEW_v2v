@@ -582,7 +582,7 @@ def interval_teacher_action(env: FutureV2VTimingEnv) -> int:
     snapshot = env.snapshot()
     if not snapshot.active_orders:
         return 1
-    from future_v2v.algorithms.baselines import HandcraftedDeadlineRulePolicy
+    from future_v2v.algorithms.baselines import HandcraftedObservableRulePolicy
 
     near_deadline_share = sum(
         1
@@ -592,12 +592,12 @@ def interval_teacher_action(env: FutureV2VTimingEnv) -> int:
     waiting_ratios = [order.waiting_ratio(env.current_tick) for order in snapshot.active_orders]
     flex_values = [vehicle.time_flexibility_ticks(env.current_tick) for vehicle in snapshot.active_vehicles]
     mean_flex = float(np.mean(flex_values)) if flex_values else 0.0
-    strong_rule_action = HandcraftedDeadlineRulePolicy().act(env, env._observation())
+    strong_rule_action = HandcraftedObservableRulePolicy().act(env, env._observation())
     if strong_rule_action == MATCH_FULL:
         return 0
     if near_deadline_share >= 0.12 or (waiting_ratios and max(waiting_ratios) >= 0.82) or mean_flex <= 3.0:
         return 0
-    opportunity = env.estimate_wait_opportunity(snapshot)
+    opportunity = env.estimate_wait_opportunity(snapshot, include_future_orders=False)
     pressure = len(snapshot.active_orders) / max(1, len(snapshot.active_vehicles))
     edge_coverage = len({edge.order_id for edge in snapshot.candidate_edges}) / max(1, len(snapshot.active_orders))
     if opportunity >= 260.0 and pressure <= 0.75 and near_deadline_share < 0.06:

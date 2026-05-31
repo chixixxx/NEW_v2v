@@ -245,3 +245,11 @@ def test_paired_delta_summary_includes_standard_error() -> None:
     rows = run_experiment._paired_policy_delta_summary([metric_a, metric_b])
     assert "score_delta_sem" in rows[0]
     assert "profit_delta_sem" in rows[0]
+
+
+def test_eval_summary_zh_csv_uses_utf8_bom(tmp_path) -> None:
+    from future_v2v.metrics import write_csv
+
+    path = tmp_path / "eval_summary_zh.csv"
+    write_csv(path, [{"策略名称": "自适应时机PPO"}], encoding="utf-8-sig")
+    assert path.read_bytes().startswith(b"\xef\xbb\xbf")

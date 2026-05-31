@@ -240,17 +240,21 @@ def run_eval(
         if stale_friction_path.exists():
             stale_friction_path.unlink()
     write_csv(run_dir / "eval" / "environment_acceptance_summary.csv", acceptance_rows)
-    write_csv(run_dir / "eval" / "eval_summary_zh.csv", _eval_summary_zh_rows(summary_rows))
+    write_csv(run_dir / "eval" / "eval_summary_zh.csv", _eval_summary_zh_rows(summary_rows), encoding="utf-8-sig")
     write_markdown_report(
         run_dir / "eval" / "eval_report.md",
         title=f"Future V2V Timing Evaluation ({scale_name})",
         summary_lines=[
-            "主表按 future_v2v_score_mean 排序；profit、服务率、取消和过期是辅助解释指标。",
+            "主表按 future_v2v_score_mean 排序；该得分已包含平台利润、服务可靠性、接驾时间、服务占用和接驾距离软成本。",
+            "正式判断优先看配对差值、标准误和胜率，不只看跨场景标准差。",
             "timing_degenerate_risk=True 表示策略可能退化为过于频繁的一步匹配。",
-            "friction sensitivity is disabled by default; run scripts/run_friction_sensitivity.py for robustness checks.",
+            "交易摩擦灵敏度默认关闭；需要稳健性检查时运行 scripts/run_friction_sensitivity.py。",
             f"episodes_per_policy={len(manifest_rows)}, eval_workers={eval_workers}",
         ],
         table_rows=summary_rows,
+        extra_tables=[
+            ("配对差值（相对固定1步完整匹配）", _paired_delta_report_rows(paired_rows)),
+        ],
     )
 
 
@@ -637,7 +641,9 @@ def _translate_eval_summary_value(field: str, value: object) -> object:
             "fixed_2_tick_full_match": "固定2步完整匹配",
             "fixed_3_tick_full_match": "固定3步完整匹配",
             "fixed_4_tick_full_match": "固定4步完整匹配",
-            "handcrafted_deadline_rule": "手写临期强规则",
+            "handcrafted_observable_rule": "手写公平可观测规则",
+            "handcrafted_lookahead_rule": "手写前视强规则",
+            "handcrafted_deadline_rule": "手写前视强规则",
             "adaptive_timing_ppo": "自适应时机PPO",
             "adaptive_interval_dqn": "自适应间隔DQN",
         }
@@ -842,6 +848,23 @@ def _paired_policy_delta_summary(
         )
     rows.sort(key=lambda row: float(row["score_delta_mean"]), reverse=True)
     return rows
+
+
+def _paired_delta_report_rows(paired_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    fields = [
+        "policy_name",
+        "reference_policy",
+        "paired_episodes",
+        "score_delta_mean",
+        "score_delta_sem",
+        "score_win_rate",
+        "profit_delta_mean",
+        "profit_delta_sem",
+        "service_delta_mean",
+        "expired_delta_mean",
+        "batch_interval_delta_mean",
+    ]
+    return [{field: row.get(field, "") for field in fields} for row in paired_rows]
 
 
 def _run_friction_sensitivity(
@@ -1145,10 +1168,14 @@ def _environment_acceptance_summary(
     paired_best_delta = float(paired_best.get("score_delta_mean", 0.0))
     friction_sensitivity_run = bool(sensitivity_rows)
     no_refresh_delta = _variant_delta(sensitivity_rows, "no_refresh_friction") if friction_sensitivity_run else 0.0
+    fixed_1_target_band = bool(fixed_1.get("environment_target_band", False))
+    fixed_2_target_band = bool(fixed_2.get("environment_target_band", False))
+    target_band_policy_count = sum(1 for row in summary_rows if bool(row.get("environment_target_band", False)))
     baseline_ready = bool(
         paired_best_delta > 250.0
         and 0.04 <= fixed_1_service - fixed_2_service <= 0.10
-        and 0.15 <= fixed_1_expired <= 0.26
+        and fixed_1_target_band
+        and fixed_2_target_band
         and 1.00 <= best_interval <= 2.50
     )
     friction_robust_ready = bool(baseline_ready and (not friction_sensitivity_run or no_refresh_delta >= 200.0))
@@ -1166,6 +1193,9 @@ def _environment_acceptance_summary(
             "best_score_delta_vs_fixed1": best_score_delta,
             "best_mean_batch_interval": best_interval,
             "fixed1_expired_rate": fixed_1_expired,
+            "fixed1_environment_target_band": fixed_1_target_band,
+            "fixed2_environment_target_band": fixed_2_target_band,
+            "target_band_policy_count": target_band_policy_count,
             "fixed2_service_drop_vs_fixed1": fixed_1_service - fixed_2_service,
             "learned_policy_name": learned_policy_name,
             "learned_policy_binary_action_count": binary_total,

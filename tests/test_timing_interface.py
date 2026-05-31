@@ -41,9 +41,11 @@ def test_default_eval_baselines_are_concise_main_table() -> None:
         "fixed_2_tick_full_match",
         "fixed_3_tick_full_match",
         "fixed_4_tick_full_match",
-        "handcrafted_deadline_rule",
+        "handcrafted_observable_rule",
+        "handcrafted_lookahead_rule",
     ]
     assert policy_from_name("fixed_1_tick_full_match").name == "fixed_1_tick_full_match"
+    assert policy_from_name("handcrafted_deadline_rule").name == "handcrafted_deadline_rule"
     with pytest.raises(KeyError):
         policy_from_name("fixed_1_tick_top_batch")
 

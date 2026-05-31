@@ -42,7 +42,7 @@
     "mean_pickup_soft_cap_min": 10.0,
     "mean_commitment_soft_cap_ticks": 7.0,
     "profit_scale_fallback": 5.0,
-    "pickup_distance_penalty_per_km": 0.0,
+    "pickup_distance_penalty_per_km": 0.05,
     "observation_profile": "compact_v2v",
     "enable_stochastic_acceptance": true,
     "enable_stochastic_cancellation": true,

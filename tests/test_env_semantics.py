@@ -98,19 +98,27 @@ def test_match_updates_order_vehicle_and_profit() -> None:
     assert info["step_result"].mean_pickup_distance_km > 0.0
 
 
-def test_episode_metrics_include_distance_adjusted_score() -> None:
-    env = make_env()
-    env.env_config = env.env_config.__class__(
+def test_episode_metrics_include_pickup_distance_in_score() -> None:
+    baseline = make_env()
+    install_single_order_vehicle(baseline, max_wait_ticks=2)
+    baseline.step(MATCH_FULL)
+    baseline_metrics = baseline.episode_metrics(policy_name="unit", seed=1)
+
+    penalized = make_env()
+    penalized.env_config = penalized.env_config.__class__(
         **{
-            **env.env_config.__dict__,
+            **penalized.env_config.__dict__,
             "pickup_distance_penalty_per_km": 2.0,
         }
     )
-    install_single_order_vehicle(env, max_wait_ticks=2)
-    env.step(MATCH_FULL)
-    metrics = env.episode_metrics(policy_name="unit", seed=1)
-    assert metrics.total_pickup_distance_km == env.orders[0].pickup_distance_km_est
-    assert metrics.distance_adjusted_score == metrics.future_v2v_score - 2.0 * metrics.total_pickup_distance_km
+    install_single_order_vehicle(penalized, max_wait_ticks=2)
+    penalized.step(MATCH_FULL)
+    metrics = penalized.episode_metrics(policy_name="unit", seed=1)
+    assert metrics.total_pickup_distance_km == penalized.orders[0].pickup_distance_km_est
+    assert metrics.distance_adjusted_score == metrics.future_v2v_score
+    assert abs(
+        baseline_metrics.future_v2v_score - metrics.future_v2v_score - 2.0 * metrics.total_pickup_distance_km
+    ) < 1e-9
 
 
 def test_interval_action_waits_then_dispatches_full_match() -> None:

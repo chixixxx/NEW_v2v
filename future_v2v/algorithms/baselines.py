@@ -30,13 +30,14 @@ class FixedIntervalPolicy:
 
 
 @dataclass
-class HandcraftedDeadlineRulePolicy:
+class HandcraftedObservableRulePolicy:
     slack_threshold: int = 1
     urgent_full_share: float = 0.18
     high_wait_ratio: float = 0.86
     min_profit_per_order: float = 5.0
+    include_future_orders: bool = False
 
-    name: str = "handcrafted_deadline_rule"
+    name: str = "handcrafted_observable_rule"
 
     def act(self, env: FutureV2VTimingEnv, obs: np.ndarray) -> int:
         _ = obs
@@ -53,7 +54,10 @@ class HandcraftedDeadlineRulePolicy:
         if near_deadline_share >= self.urgent_full_share or max(waiting_ratios) >= self.high_wait_ratio:
             return MATCH_FULL
         recently_dispatched = bool(env.dispatch_ticks and env.current_tick - env.dispatch_ticks[-1] <= 1)
-        wait_opportunity = env.estimate_wait_opportunity(snapshot)
+        wait_opportunity = env.estimate_wait_opportunity(
+            snapshot,
+            include_future_orders=self.include_future_orders,
+        )
         if recently_dispatched and wait_opportunity >= 0.0 and near_deadline_share < 0.08:
             return WAIT
         full_plan = env.matcher.solve(env.orders, env.vehicles, env.current_tick)
@@ -65,17 +69,31 @@ class HandcraftedDeadlineRulePolicy:
         return WAIT
 
 
+@dataclass
+class HandcraftedLookaheadRulePolicy(HandcraftedObservableRulePolicy):
+    include_future_orders: bool = True
+    name: str = "handcrafted_lookahead_rule"
+
+
+@dataclass
+class HandcraftedDeadlineRulePolicy(HandcraftedLookaheadRulePolicy):
+    name: str = "handcrafted_deadline_rule"
+
+
 def default_baselines() -> list[TimingPolicy]:
     return [
         FixedIntervalPolicy(interval=1),
         FixedIntervalPolicy(interval=2),
         FixedIntervalPolicy(interval=3),
         FixedIntervalPolicy(interval=4),
-        HandcraftedDeadlineRulePolicy(),
+        HandcraftedObservableRulePolicy(),
+        HandcraftedLookaheadRulePolicy(),
     ]
 
 
 def policy_from_name(name: str) -> TimingPolicy:
+    if name == "handcrafted_deadline_rule":
+        return HandcraftedDeadlineRulePolicy()
     for policy in default_baselines():
         if policy.name == name:
             return policy

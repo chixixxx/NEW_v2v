@@ -12,7 +12,7 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from future_v2v.algorithms.baselines import HandcraftedDeadlineRulePolicy
+from future_v2v.algorithms.baselines import HandcraftedObservableRulePolicy
 from future_v2v.algorithms.reward_shaping import compute_pbrs_potential, shape_reward
 from future_v2v.config import EnvironmentConfig, ScaleConfig, TrainingConfig
 from future_v2v.envs.timing_env import MATCH_FULL, WAIT, FutureV2VTimingEnv
@@ -729,10 +729,10 @@ def binary_teacher_action_with_weight(env: FutureV2VTimingEnv) -> tuple[int, flo
     mean_flex = float(np.mean(flex_values)) if flex_values else 0.0
     if near_deadline_share >= 0.12 or max_wait >= 0.82 or mean_flex <= 3.0:
         return MATCH_FULL, 2.5
-    strong_rule_action = HandcraftedDeadlineRulePolicy().act(env, env._observation())
+    strong_rule_action = HandcraftedObservableRulePolicy().act(env, env._observation())
     if strong_rule_action == MATCH_FULL:
         return MATCH_FULL, 1.6
-    opportunity = env.estimate_wait_opportunity(snapshot)
+    opportunity = env.estimate_wait_opportunity(snapshot, include_future_orders=False)
     recently_dispatched = bool(env.dispatch_ticks and env.current_tick - env.dispatch_ticks[-1] <= 1)
     pressure = len(snapshot.active_orders) / max(1, len(snapshot.active_vehicles))
     if recently_dispatched and opportunity >= -20.0 and near_deadline_share < 0.10:

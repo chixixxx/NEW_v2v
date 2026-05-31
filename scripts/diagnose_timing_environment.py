@@ -12,7 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from future_v2v.algorithms.baselines import FixedIntervalPolicy, HandcraftedDeadlineRulePolicy, run_policy_episode
+from future_v2v.algorithms.baselines import (
+    FixedIntervalPolicy,
+    HandcraftedLookaheadRulePolicy,
+    HandcraftedObservableRulePolicy,
+    run_policy_episode,
+)
 from future_v2v.config import ProjectConfig, load_project_config, resolve_run_dir
 from future_v2v.envs.timing_env import MATCH_FULL, WAIT, FutureV2VTimingEnv
 from future_v2v.metrics import EpisodeMetrics, summarize_metrics, write_csv
@@ -243,7 +248,8 @@ def fixed_interval_envelope_rows(
         FixedIntervalPolicy(interval=2),
         FixedIntervalPolicy(interval=3),
         FixedIntervalPolicy(interval=4),
-        HandcraftedDeadlineRulePolicy(),
+        HandcraftedObservableRulePolicy(),
+        HandcraftedLookaheadRulePolicy(),
     ]
     metrics: list[EpisodeMetrics] = []
     for scenario in progress(manifest, desc="fixed interval envelope", total=len(manifest), unit="scenario"):
